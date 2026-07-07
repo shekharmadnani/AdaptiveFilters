@@ -22,7 +22,15 @@ class LearnedWienerProbe(Probe):
         r = self.filter.apply(frame)
         crop = frame[: r.filtered.shape[0], : r.filtered.shape[1]]
 
-        feats = common_residual_features(r.filtered, r.residual)
+        # color results: the 2-D residual/edge statistics use the luma
+        # plane; the K statistics cover all channels
+        filtered2d, residual2d = r.filtered, r.residual
+        if residual2d.ndim == 3:
+            filtered2d = filtered2d[:, :, 0]
+            residual2d = residual2d[:, :, 0]
+            crop = crop[:, :, 0]
+
+        feats = common_residual_features(filtered2d, residual2d)
 
         dk = (r.k_pred - r.k_emp).ravel()
         feats["dk_abs_mean"] = float(np.abs(dk).mean())
@@ -34,13 +42,13 @@ class LearnedWienerProbe(Probe):
         feats["k_tail_mean"] = float(r.k_tail.mean())
 
         gx_o = np.abs(np.diff(crop, axis=1))
-        gx_r = np.abs(np.diff(r.filtered, axis=1))
+        gx_r = np.abs(np.diff(filtered2d, axis=1))
         gy_o = np.abs(np.diff(crop, axis=0))
-        gy_r = np.abs(np.diff(r.filtered, axis=0))
+        gy_r = np.abs(np.diff(filtered2d, axis=0))
         feats["new_edge1"] = float(np.maximum(gx_r - gx_o, 0).mean()
                                    + np.maximum(gy_r - gy_o, 0).mean())
         feats["lost_edge1"] = float(np.maximum(gx_o - gx_r, 0).mean()
                                     + np.maximum(gy_o - gy_r, 0).mean())
 
-        return ProbeResult(filtered=r.filtered, residual=r.residual,
+        return ProbeResult(filtered=filtered2d, residual=residual2d,
                            features=feats)

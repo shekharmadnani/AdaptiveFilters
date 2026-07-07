@@ -120,6 +120,30 @@ def iter_ffmpeg(path, ffmpeg="ffmpeg"):
         proc.wait()
 
 
+def iter_ffmpeg_color(path, ffmpeg="ffmpeg"):
+    """Decode any container/codec to uint8 (H, W, 3) YUV frames at luma
+    resolution (chroma upsampled to 4:4:4 by ffmpeg). uint8 keeps the
+    memory footprint of frame pools manageable; convert at crop time."""
+    w, h = ffprobe_dims(path)
+    proc = subprocess.Popen(
+        [ffmpeg, "-v", "error", "-i", str(path), "-map", "0:v:0",
+         "-f", "rawvideo", "-pix_fmt", "yuv444p", "pipe:1"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        while True:
+            buf = _read_exact(proc.stdout, 3 * w * h)
+            if buf is None:
+                break
+            planes = np.frombuffer(buf, np.uint8).reshape(3, h, w)
+            yield planes.transpose(1, 2, 0).copy()   # (H, W, 3) = Y, U, V
+    finally:
+        proc.stdout.close()
+        proc.kill()
+        proc.wait()
+
+
 def load_image_luma(path):
     from PIL import Image
 

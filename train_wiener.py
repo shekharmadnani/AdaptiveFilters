@@ -34,17 +34,19 @@ def train(args):
     device = pick_device(args.device)
     print(f"Device: {device}")
 
-    print("Gathering pristine frames...")
-    frames = gather_frames(args.bvi if os.path.isdir(args.bvi) else None)
+    print("Gathering pristine frames (color)...")
+    frames = gather_frames(args.bvi if os.path.isdir(args.bvi) else None,
+                           color=True)
     crops = sample_patches(frames, args.crops, size=args.crop_size,
                            seed=args.seed)
-    print(f"Training crops: {crops.shape}")
+    print(f"Training crops: {crops.shape}  (N, C, H, W)")
 
-    model = WienerDctModel(lam_rate=args.lam_rate).to(device)
+    model = WienerDctModel(lam_rate=args.lam_rate, in_channels=3,
+                           gmax=args.gmax).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=1e-3)
 
     if args.naturalness:
-        data = torch.from_numpy(crops[:, None, :, :])
+        data = torch.from_numpy(crops)
         targets = None
         print("Naturalness mode: self-reconstruction on pristine crops")
     else:
@@ -56,15 +58,15 @@ def train(args):
             print(f"Adding {n_h264} real-H.264 pairs "
                   "(no-deblock encodes; corrupted slice NALs; -ec 1)...")
             h264 = gather_h264_crops(args.bvi, n_h264, size=args.crop_size,
-                                     seed=args.seed)
+                                     seed=args.seed, color=True)
             if h264 is not None:
                 ph, dh = h264
                 pris_all = np.concatenate([pris_all, ph])
                 deg_all = np.concatenate([deg_all, dh])
                 print(f"Total pairs: {len(pris_all)} "
                       f"({len(ph)} from real H.264)")
-        data = torch.from_numpy(deg_all[:, None, :, :])
-        targets = torch.from_numpy(pris_all[:, None, :, :])
+        data = torch.from_numpy(deg_all)
+        targets = torch.from_numpy(pris_all)
 
     rng = np.random.default_rng(args.seed)
     n_data = len(data)
@@ -87,7 +89,8 @@ def train(args):
         print(f"epoch {epoch + 1:2d}/{args.epochs}  "
               f"loss={acc['loss']:.5f}  recon={acc['recon']:.5f}  "
               f"Kg={acc['k_mean']:5.1f}  g_mean={acc['g_mean']:.3f}  "
-              f"newE1={acc['new_e1']:.5f}  ({time.time() - t0:.1f}s)")
+              f"g>1={acc['g_over1']:.3f}  tv1={acc['tv1']:.4f}  "
+              f"({time.time() - t0:.1f}s)")
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     save_model(model, args.out, extra={"crops": len(crops),
@@ -95,29 +98,38 @@ def train(args):
     print(f"Saved -> {args.out}")
 
 
+def _jpeg_like_color(frame_hw3, q):
+    out = np.empty_like(frame_hw3)
+    for c in range(frame_hw3.shape[2]):
+        out[:, :, c] = jpeg_like(frame_hw3[:, :, c], q)
+    return out
+
+
 def validate(args):
+    from adaptive_filters.learned.patches import synthetic_color_frame
     from adaptive_filters.probes.learned_wiener_probe import LearnedWienerProbe
 
     probe = LearnedWienerProbe(args.out, device=args.device)
     qualities = [100, 90, 70, 50, 30, 10]
     sev = [100 - q for q in qualities]
 
-    tests = [("synthetic", make_frame(999, size=512))]
+    tests = [("synthetic",
+              synthetic_color_frame(999, size=512).astype(np.float64))]
     frames = gather_frames(args.bvi if os.path.isdir(args.bvi) else None,
-                           frames_per_video=1, verbose=False)
+                           frames_per_video=1, color=True, verbose=False)
     if frames:
-        f = frames[-1]
-        h, w = f.shape
+        f = frames[-1].astype(np.float64)
+        h, w = f.shape[:2]
         tests.append(("bvi_master",
                       f[h // 2 - 256 : h // 2 + 256,
-                        w // 2 - 256 : w // 2 + 256] * 255.0))
+                        w // 2 - 256 : w // 2 + 256, :]))
 
-    print("\nValidation: per-feature SRCC vs JPEG-like severity")
+    print("\nValidation: per-feature SRCC vs JPEG-like severity (color)")
     ok = True
     for name, frame in tests:
         rows = {}
         for q in qualities:
-            deg = frame if q == 100 else jpeg_like(frame, q)
+            deg = frame if q == 100 else _jpeg_like_color(frame, q)
             for kk, v in probe.run(deg / 255.0).features.items():
                 rows.setdefault(kk, []).append(v)
         scored = sorted(((abs(spearman(sev, v)), kk) for kk, v in rows.items()),
@@ -144,6 +156,9 @@ def main():
     ap.add_argument("--epochs", type=int, default=12)
     ap.add_argument("--batch", type=int, default=64)
     ap.add_argument("--lam-rate", type=float, default=2.5e-3)
+    ap.add_argument("--gmax", type=float, default=4.0,
+                    help="upper bound of the coefficient gains (>1 allows "
+                         "amplification)")
     ap.add_argument("--w-e1", type=float, default=0.05)
     ap.add_argument("--w-e2", type=float, default=0.05)
     ap.add_argument("--naturalness", action="store_true",

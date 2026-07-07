@@ -25,12 +25,19 @@ def _bvi_hd_masters(bvi_dir):
 
 
 def gather_frames(bvi_dir=None, frames_per_video=5, frame_stride=60,
-                  max_frame_index=290, verbose=True):
-    """Decode a sparse set of frames from each master (float64 luma [0,1])."""
+                  max_frame_index=290, color=False, verbose=True):
+    """Decode a sparse set of frames from each master.
+
+    Gray: float64 luma [0,1] (H, W). Color: uint8 YUV (H, W, 3) at luma
+    resolution (uint8 keeps the pool memory-friendly; sample_patches
+    converts at crop time)."""
+    from ..io import iter_ffmpeg_color
+
     frames = []
     for path in _bvi_hd_masters(bvi_dir):
         taken = 0
-        for idx, f in enumerate(iter_ffmpeg(path)):
+        it = iter_ffmpeg_color(path) if color else iter_ffmpeg(path)
+        for idx, f in enumerate(it):
             if idx % frame_stride == 0:
                 frames.append(f)
                 taken += 1
@@ -41,20 +48,45 @@ def gather_frames(bvi_dir=None, frames_per_video=5, frame_stride=60,
     if not frames:
         if verbose:
             print("  no masters found -- using synthetic frames")
-        frames = [make_frame(s, size=512) / 255.0 for s in range(24)]
+        if color:
+            frames = [synthetic_color_frame(s, size=512) for s in range(24)]
+        else:
+            frames = [make_frame(s, size=512) / 255.0 for s in range(24)]
     return frames
 
 
+def synthetic_color_frame(seed, size=512):
+    """uint8 (H, W, 3) synthetic YUV-like frame: structured luma, smoother
+    correlated chroma (synthetic fallback / validation only)."""
+    y = make_frame(seed, size=size)
+    u = 128.0 + 0.35 * (make_frame(seed + 7000, size=size) - 128.0)
+    v = 128.0 + 0.35 * (make_frame(seed + 8000, size=size) - 128.0)
+    return np.clip(np.stack([y, u, v], axis=-1), 0, 255).astype(np.uint8)
+
+
+def _to_float01(x):
+    x = np.asarray(x)
+    if x.dtype == np.uint8:
+        return x.astype(np.float32) / 255.0
+    return x.astype(np.float32)
+
+
 def sample_patches(frames, n, size=64, seed=0):
-    """Random 8-aligned crops across the frame pool -> (n, size, size) f32."""
+    """Random 8-aligned crops across the frame pool.
+
+    Gray frames -> (n, size, size); color frames -> (n, 3, size, size)
+    (channel-first, ready for torch). Always float32 in [0, 1]."""
     rng = np.random.default_rng(seed)
-    out = np.empty((n, size, size), dtype=np.float32)
+    color = frames[0].ndim == 3
+    shape = (n, 3, size, size) if color else (n, size, size)
+    out = np.empty(shape, dtype=np.float32)
     for i in range(n):
         f = frames[int(rng.integers(len(frames)))]
-        h, w = f.shape
+        h, w = f.shape[:2]
         y0 = int(rng.integers(0, (h - size) // 8 + 1)) * 8
         x0 = int(rng.integers(0, (w - size) // 8 + 1)) * 8
-        out[i] = f[y0 : y0 + size, x0 : x0 + size]
+        crop = _to_float01(f[y0 : y0 + size, x0 : x0 + size])
+        out[i] = crop.transpose(2, 0, 1) if color else crop
     return out
 
 
@@ -66,7 +98,7 @@ TRAIN_ARTIFACTS = ["compression", "blur", "noise", "banding",
 
 
 def gather_h264_crops(bvi_dir, n, size=128, seed=0, nframes=62,
-                      verbose=True):
+                      color=False, verbose=True):
     """Aligned (pristine, degraded) crops from REAL H.264 encodes.
 
     Per master: one compression-only stream and one bitstream-corrupted
@@ -79,14 +111,18 @@ def gather_h264_crops(bvi_dir, n, size=128, seed=0, nframes=62,
     import tempfile
 
     from ..io import ffprobe_dims
-    from ..bitstream import encode_h264, corrupt_annexb, decode_gray_u8
+    from ..bitstream import (
+        encode_h264, corrupt_annexb, decode_gray_u8, decode_yuv444_u8,
+    )
 
+    decode = decode_yuv444_u8 if color else decode_gray_u8
     masters = _bvi_hd_masters(bvi_dir)
     if not masters or n <= 0:
         return None
     rng = np.random.default_rng(seed + 909)
-    pris = np.empty((n, size, size), dtype=np.float32)
-    degr = np.empty((n, size, size), dtype=np.float32)
+    shape = (n, 3, size, size) if color else (n, size, size)
+    pris = np.empty(shape, dtype=np.float32)
+    degr = np.empty(shape, dtype=np.float32)
     per_cfg = max(1, int(np.ceil(n / (2 * len(masters)))))
     idx = 0
 
@@ -95,7 +131,7 @@ def gather_h264_crops(bvi_dir, n, size=128, seed=0, nframes=62,
             if idx >= n:
                 break
             w, h = ffprobe_dims(mpath)
-            refs = decode_gray_u8(mpath, w, h, max_frames=nframes)
+            refs = decode(mpath, w, h, max_frames=nframes)
             configs = [
                 (int(rng.choice([26, 32, 38, 44])), 0.0),
                 (int(rng.choice([22, 28, 34, 40])),
@@ -110,7 +146,7 @@ def gather_h264_crops(bvi_dir, n, size=128, seed=0, nframes=62,
                     with open(enc, "wb") as f:
                         f.write(corrupt_annexb(data, cfrac,
                                                seed + 100 * mi + ci))
-                degs = decode_gray_u8(enc, w, h, max_frames=nframes)
+                degs = decode(enc, w, h, max_frames=nframes)
                 m = min(len(refs), len(degs))
                 if m < 12:
                     continue
@@ -120,10 +156,13 @@ def gather_h264_crops(bvi_dir, n, size=128, seed=0, nframes=62,
                     fi = fids[int(rng.integers(len(fids)))]
                     y0 = int(rng.integers(0, (h - size) // 8 + 1)) * 8
                     x0 = int(rng.integers(0, (w - size) // 8 + 1)) * 8
-                    pris[idx] = refs[fi][y0:y0 + size, x0:x0 + size] \
+                    p = refs[fi][y0:y0 + size, x0:x0 + size] \
                         .astype(np.float32) / 255.0
-                    degr[idx] = degs[fi][y0:y0 + size, x0:x0 + size] \
+                    d = degs[fi][y0:y0 + size, x0:x0 + size] \
                         .astype(np.float32) / 255.0
+                    if color:
+                        p, d = p.transpose(2, 0, 1), d.transpose(2, 0, 1)
+                    pris[idx], degr[idx] = p, d
                     idx += 1
                     took += 1
                 if verbose:
@@ -139,19 +178,30 @@ def make_degraded(pristine, seed=0, clean_frac=0.15,
     """Degraded twin of each pristine crop: random artifact x severity.
 
     A `clean_frac` share stays pristine so the model learns to preserve
-    clean content (identity on no-artifact input).
+    clean content (identity on no-artifact input). Color crops
+    (n, C, s, s) are degraded per channel with the SAME seed so the
+    artifact geometry (bands, blocks) is spatially consistent across
+    channels, as it is in real transmission errors.
     """
     from ..artifacts import apply_artifact
 
     rng = np.random.default_rng(seed + 555)
     out = np.empty_like(pristine)
+    color = pristine.ndim == 4
     for i in range(len(pristine)):
         if rng.random() < clean_frac:
             out[i] = pristine[i]
             continue
         name = artifact_names[int(rng.integers(len(artifact_names)))]
         sev = int(rng.integers(1, 6))
-        out[i] = np.clip(
-            apply_artifact(name, pristine[i].astype(np.float64) * 255.0,
-                           sev, seed=seed + i) / 255.0, 0.0, 1.0)
+        if color:
+            for c in range(pristine.shape[1]):
+                out[i, c] = np.clip(
+                    apply_artifact(name,
+                                   pristine[i, c].astype(np.float64) * 255.0,
+                                   sev, seed=seed + i) / 255.0, 0.0, 1.0)
+        else:
+            out[i] = np.clip(
+                apply_artifact(name, pristine[i].astype(np.float64) * 255.0,
+                               sev, seed=seed + i) / 255.0, 0.0, 1.0)
     return out

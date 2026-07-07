@@ -49,18 +49,32 @@ def corrupt_annexb(data, frac, seed, flips=6):
 def decode_gray_u8(path, width, height, max_frames=None, ffmpeg="ffmpeg"):
     """Decode any input to a list of uint8 gray frames. Error-resilient:
     ignore_err + concealment WITHOUT its deblock stage (-ec 1)."""
+    return _decode_u8(path, width, height, "gray", 1, max_frames, ffmpeg)
+
+
+def decode_yuv444_u8(path, width, height, max_frames=None, ffmpeg="ffmpeg"):
+    """Same error-resilient decode, but color: uint8 (H, W, 3) YUV frames
+    at luma resolution."""
+    return _decode_u8(path, width, height, "yuv444p", 3, max_frames, ffmpeg)
+
+
+def _decode_u8(path, width, height, pix_fmt, nplanes, max_frames, ffmpeg):
     cmd = [ffmpeg, "-v", "error", "-err_detect", "ignore_err", "-ec", "1",
-           "-i", str(path), "-f", "rawvideo", "-pix_fmt", "gray", "pipe:1"]
+           "-i", str(path), "-f", "rawvideo", "-pix_fmt", pix_fmt, "pipe:1"]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                             stderr=subprocess.DEVNULL)
     frames = []
     try:
         while max_frames is None or len(frames) < max_frames:
-            buf = _read_exact(proc.stdout, width * height)
+            buf = _read_exact(proc.stdout, nplanes * width * height)
             if buf is None:
                 break
-            frames.append(
-                np.frombuffer(buf, np.uint8).reshape(height, width).copy())
+            arr = np.frombuffer(buf, np.uint8)
+            if nplanes == 1:
+                frames.append(arr.reshape(height, width).copy())
+            else:
+                frames.append(arr.reshape(nplanes, height, width)
+                              .transpose(1, 2, 0).copy())
     finally:
         proc.stdout.close()
         proc.kill()

@@ -89,8 +89,11 @@ class AdaptiveDctFilter:
 class AdaptiveWienerFilter:
     """DCT-domain adaptive Wiener filter (gain-map model): numpy in/out.
 
-    Same result contract as AdaptiveDctFilter, with k_pred = effective AC
-    count (sum of predicted gains per block) -- the continuous analog of K.
+    Color-capable: input (H, W, C) or (H, W); a gray input is replicated to
+    the model's channel count. Outputs match the input layout -- filtered
+    and residual are (H8, W8, C) for color, (H8, W8) for gray -- and the
+    K maps are (C, H8/8, W8/8) for color. k_pred = effective AC count
+    (sum of predicted gains per block), the continuous analog of K.
     """
 
     def __init__(self, weights, device=None):
@@ -103,6 +106,7 @@ class AdaptiveWienerFilter:
         self.device = pick_device(device)
         self.model = load_model(weights, device=self.device)
         self.lam_rate = self.model.lam_rate
+        self.in_channels = self.model.in_channels
 
     def apply(self, frame):
         torch = self._torch
@@ -111,17 +115,25 @@ class AdaptiveWienerFilter:
         frame = np.asarray(frame, dtype=np.float64)
         if frame.max() > 2.0:
             frame = frame / 255.0
+        gray_in = frame.ndim == 2
+        if gray_in:
+            frame = np.repeat(frame[:, :, None], self.in_channels, axis=2)
+        c = frame.shape[2]
+        if c != self.in_channels:
+            raise ValueError(
+                f"model expects {self.in_channels} channels, got {c}")
         h8, w8 = (frame.shape[0] // 8) * 8, (frame.shape[1] // 8) * 8
         crop = frame[:h8, :w8]
         gh, gw = h8 // 8, w8 // 8
 
         with torch.no_grad():
-            x = torch.from_numpy(crop.astype(np.float32))[None, None].to(
-                self.device)
+            x = torch.from_numpy(
+                crop.transpose(2, 0, 1).astype(np.float32))[None].to(
+                self.device)                              # (1, C, H, W)
             rec, _, gains, coeffs = wiener_apply(self.model, x)
 
-            k_g = gains.sum(dim=(2, 3)) - 1.0            # effective AC count
-            ac2 = coeffs.reshape(1, -1, 64)[..., 1:].pow(2)
+            k_g = gains.sum(dim=(-1, -2)) - 1.0     # (1, C, N) effective AC
+            ac2 = coeffs.reshape(1, c, -1, 64)[..., 1:].pow(2)
             k_emp = (ac2 > self.lam_rate).float().sum(-1)
             srt = ac2.sort(dim=-1, descending=True).values
             cum = srt.cumsum(-1)
@@ -130,10 +142,15 @@ class AdaptiveWienerFilter:
             k_tail = torch.where(total.squeeze(-1) < 1e-10,
                                  torch.zeros_like(k_tail), k_tail)
 
-            filtered = rec.squeeze().cpu().numpy().astype(np.float64)
-            k_pred_np = k_g.reshape(gh, gw).cpu().numpy().astype(np.float64)
-            k_emp_np = k_emp.reshape(gh, gw).cpu().numpy().astype(np.float64)
-            k_tail_np = k_tail.reshape(gh, gw).cpu().numpy().astype(np.float64)
+            filtered = rec.squeeze(0).permute(1, 2, 0).cpu().numpy() \
+                .astype(np.float64)                       # (H8, W8, C)
+            k_pred_np = k_g.reshape(c, gh, gw).cpu().numpy().astype(np.float64)
+            k_emp_np = k_emp.reshape(c, gh, gw).cpu().numpy().astype(np.float64)
+            k_tail_np = k_tail.reshape(c, gh, gw).cpu().numpy().astype(np.float64)
+
+        if gray_in:  # collapse back to the caller's layout (channels equal)
+            filtered = filtered[:, :, 0]
+            crop = crop[:, :, 0]
 
         return AdaptiveDctResult(
             filtered=filtered,
