@@ -1,0 +1,5 @@
+# Core (mandatory)
+numpy>=1.22
+
+# Optional: GBT fusion stage (RidgeFusion works without it)
+# xgboost>=1.7

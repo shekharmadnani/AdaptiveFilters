@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+
+# Local Claude Code settings
+.claude/settings.local.json
+
+# Generated data: datasets, encodes, caches, VMAF logs
+datasets/
+examples/demo_data/
+
+# Filter inspection outputs (regenerate with inspect_filter.py)
+out_inspect*/
