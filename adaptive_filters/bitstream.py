@@ -19,13 +19,21 @@ import numpy as np
 from .io import _read_exact
 
 
-def encode_h264(src_path, out_path, nframes, crf, ffmpeg="ffmpeg"):
-    """Annex-B elementary stream; loop deblocking off; 4 slices/frame so
-    corruption stays localized; GOP 30 so errors propagate realistically."""
+def encode_h264(src_path, out_path, nframes, crf, ffmpeg="ffmpeg",
+                deblock=False):
+    """Annex-B elementary stream; 4 slices/frame so corruption stays
+    localized; GOP 30 so errors propagate realistically.
+
+    deblock=False (default, used for TRAINING data): in-loop deblocking
+    disabled -- raw quantization blockiness. deblock=True (stress TESTS
+    only): normal x264 with the loop filter on, i.e. blockiness that the
+    codec has already smoothed -- the harder detection case.
+    """
+    params = "deblock=1" if deblock else "no-deblock=1"
     cmd = [ffmpeg, "-y", "-v", "error", "-i", str(src_path),
            "-frames:v", str(nframes), "-c:v", "libx264",
            "-preset", "veryfast", "-crf", str(crf),
-           "-x264-params", "no-deblock=1", "-slices", "4", "-g", "30",
+           "-x264-params", params, "-slices", "4", "-g", "30",
            "-f", "h264", str(out_path)]
     subprocess.run(cmd, check=True, capture_output=True)
 

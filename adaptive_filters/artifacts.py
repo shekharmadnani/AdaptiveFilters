@@ -108,6 +108,19 @@ def block_fill(frame, severity, prev_frame=None, seed=0):
     return out
 
 
+def ringing(frame, severity, prev_frame=None, seed=0):
+    """Gibbs ringing: brick-wall (ideal) low-pass in the Fourier domain.
+    Oscillations appear around every strong edge -- the isolated form of
+    the ringing that DCT quantization produces as a side effect."""
+    cut = [0.50, 0.40, 0.30, 0.22, 0.15][severity - 1]
+    h, w = frame.shape
+    fy = np.fft.fftfreq(h)[:, None] / 0.5
+    fx = np.fft.rfftfreq(w)[None, :] / 0.5
+    mask = (np.sqrt(fy * fy + fx * fx) <= cut).astype(np.float64)
+    out = np.fft.irfft2(np.fft.rfft2(frame) * mask, s=(h, w))
+    return np.clip(out, 0, 255)
+
+
 def stale_regions(frame, severity, prev_frame=None, seed=0):
     """Concealment that 'succeeds' too well: regions frozen from the
     previous frame with no offset -- locally natural, temporally wrong.
@@ -131,6 +144,7 @@ ARTIFACTS = {
     "blur": blur,
     "noise": noise,
     "banding": banding,
+    "ringing": ringing,
     "pl_interp": packet_loss_interp,
     "pl_copy": packet_loss_copy,
     "block_fill": block_fill,
