@@ -1,5 +1,10 @@
 # AdaptiveFilters — content-adaptive filter probe bank for no-reference VQA
 
+> **Full technical report**: [docs/PROJECT_REPORT.md](docs/PROJECT_REPORT.md) —
+> the complete design history with explanations, all experimental results,
+> lessons learned, and an annotated bibliography (papers, tutorials,
+> reference codebases) supporting every technique used here.
+
 A NumPy-only prototype of the design discussed in the planning sessions:
 a bank of **content-adaptive filters** whose parameters are blindly estimated
 from the content itself. Each filter is a model of *natural* content, so its
