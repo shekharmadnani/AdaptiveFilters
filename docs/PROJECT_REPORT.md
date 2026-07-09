@@ -13,7 +13,7 @@ Status: research prototype, all results reproducible from the repo CLIs.
 3. [The classical probe bank](#3-the-classical-probe-bank)
 4. [The no-reference VQA pipeline](#4-the-no-reference-vqa-pipeline)
 5. [Fusion-model choice: ridge, GBT, deep learning](#5-fusion-model-choice)
-6. [The learned filter: three design generations](#6-the-learned-filter-three-generations)
+6. [The learned filter: four design generations](#6-the-learned-filter-four-generations)
 7. [Training data: simulated artifacts and real H.264 corruption](#7-training-data)
 8. [Experimental results](#8-experimental-results)
 9. [Lessons learned (empirical)](#9-lessons-learned)
@@ -186,7 +186,7 @@ classical stack, **the features are the model** — feature design carries
 ~80% of the effort and sets the accuracy ceiling; the fusion model only
 determines how close to that ceiling you get.
 
-## 6. The learned filter: three generations
+## 6. The learned filter: four generations
 
 The DCT probe's parameter estimator was progressively replaced by a CNN.
 Each generation kept the same probe interface, so every downstream
@@ -267,6 +267,67 @@ so gains start ≈ 0.7 — inside the sigmoid's responsive region, just below
 1. Collapse is visible in logs as constant K/g_mean across epochs; the
 trainer logs `g_mean`, `K_g`, and `frac(g>1)` precisely to catch it.
 
+### Generation 4 — the affine filter: X̂ = g·X + t
+
+The final form, proposed by the project owner: each coefficient gets a
+multiplier AND an additive term. In plain words: **g recycles what
+survived, t invents what died.** A gain cannot revive a coefficient that
+arrived as zero (g·0 = 0); only an additive term, predicted from the
+surrounding content, can. This completes the filter to the textbook
+affine form of the classical estimator (the Lee filter is exactly
+a·input + (1−a)·local-estimate; t is that second half with a CNN
+supplying the estimate).
+
+Four guardrails keep the invented content honest:
+
+1. **L1 price on t** (μ·Σ|t|, μ = 0.02): reusing a coefficient costs λ
+   per unit gain, inventing one costs μ per unit magnitude — the filter
+   invents only where the frame truly cannot supply the information.
+2. **L1, not L2**, so t snaps to exactly zero where unneeded — clean
+   frames keep a hard-zero baseline.
+3. **t-head initialized at zero**: training starts as the proven
+   gain-only filter and must earn its synthesis.
+4. **Bounded and DC-excluded**: |t| ≤ 1 via tanh; no brightness synthesis.
+
+**The context ablation — the project's most instructive experiment.**
+The baseline CNN sees only ~40×40 px (±2 blocks). Theory predicted: g
+("how much survived here?") is a local question; t ("what should be
+here?") needs wide context. Both halves were measured:
+
+- *Gen-3 negative control*: widening the view (dilated convolutions to
+  ~260 px; a U-Net zoom-out/zoom-in branch to whole-crop view) did NOT
+  improve the gain-only filter — the small baseline won every restoration
+  row. **g is local. Confirmed.**
+- *Gen-4 real test*: with the narrow view the t-head **died** (taxed to
+  the noise floor, unable to predict anything useful from ±2 blocks).
+  With the U-Net view, t came alive and its upper-percentile statistic
+  `t_abs_p90` became the top-ranked severity feature (SRCC +1.00).
+  **t needs context. Confirmed.**
+
+**The damage map.** t doubles as a per-block map of "how much the model
+had to invent" — near zero on clean frames, lighting up where damage
+lives. Using this synthesis-effort map as a no-reference quality signal
+appears to be novel (no match found in the free-energy, restoration-IQA,
+or learned-shrinkage literatures).
+
+### Robust training (gen4_robust — the production checkpoint)
+
+Identical model, loss and guardrails, retrained on a 10× broader pristine
+corpus: ~90 BVI-DVC source contents (streamed uint8 crops; 11,200 pairs =
+8,000 simulator + 3,200 real H.264). Validated on BVI-CC1 content the
+model never saw:
+
+- **13 of 19 features severity-monotone — the best of all six
+  checkpoints** — with the entire damage-map channel (t_tile_max,
+  t_abs_p90, t_abs_mean) at SRCC +1.00. Corpus diversity matured the t
+  signal: on 9 scenes only its upper percentiles tracked severity; on 90
+  scenes even its plain mean does.
+- Restoration PSNR ~0.5–2 dB below the 9-scene model on a CC1 test frame
+  — but the in-domain models carried a home-field advantage (trained on
+  the test content family). The robust model is measured honestly
+  out-of-domain and still holds the severe-damage wins. Less in-domain
+  polish, more generalization: the right trade for a probe.
+
 ## 7. Training data
 
 Pristine source: BVI-CC1 HD masters (9 scenes, 1080p60, 10-bit). All
@@ -342,7 +403,29 @@ adaptive filter, ranking is tied but the learned filter's **VMAF
 calibration is 3× better** — the decisive property when absolute score
 thresholds drive decisions.
 
-### 8.5 Stress campaign (15 severity ladders, Wiener standalone)
+### 8.5 Cross-generation comparison (identical degraded images)
+
+All six checkpoints (gen1 kdct, gen2 kmap, gen2 restore-trained, gen3
+wiener, gen4 affine, gen4 robust) on the same degraded real frame,
+7 artifacts × 2 severities:
+
+- **Division of labor, no dominant generation.** Selection filters
+  (gens 1–2) are gentle preservers — best fidelity on mild damage
+  (38+ dB where gain filters give ~34–35). Gain filters (gens 3–4) are
+  aggressive restorers — best on severe damage (+6–7 dB on heavy noise,
+  best severe banding). Crossover around input ≈ 32–35 dB.
+- **Gen-4's t term helps in 10 of 14 rows over gen-3** (+0.3–1.1 dB);
+  loses only on blur (the known information-theoretic limit).
+- **Feature quality**: gen1 6, gen2 9, gen2-restore 10, gen3 7, gen4 8,
+  **gen4-robust 13** monotone ladder features — and gen4 is the only
+  family where a parameter-field channel (the damage map) outranks all
+  residual statistics.
+- Implication: the generations are complementary instruments; the
+  strongest probe configuration pairs gen4-robust (primary) with
+  gen2-restore (best selection-family probe) — the companion-residuals
+  ensemble.
+
+### 8.6 Stress campaign (15 severity ladders, Wiener standalone)
 
 All 15 conditions pass (≥ 1 feature \|SRCC\| ≥ 0.9):
 
@@ -386,6 +469,22 @@ All 15 conditions pass (≥ 1 feature \|SRCC\| ≥ 0.9):
 11. **Order statistics dominate runtime at 1080p** — decimated views for
     medians/percentiles (filters stay exact) and batched matmul DCT
     (9× over einsum) made full-frame extraction practical.
+12. **Gain estimation is local; synthesis needs context** — measured with
+    a negative control (widening the view did nothing for gen-3) before
+    trusting the positive result (the gen-4 t-head dies at ±2 blocks and
+    becomes the top feature with a U-Net view).
+13. **Corpus diversity matures learned signals** — the damage map went
+    from percentile-only usefulness (9 training scenes) to fully
+    monotone in its plain mean (90 scenes), measured on content the
+    model never saw.
+14. **Beware the home-field advantage in evaluation** — models tested on
+    the content family they trained on report flattered restoration
+    numbers; only out-of-training-content results count as robustness
+    evidence.
+15. **Preservers and restorers are complementary, not competing** —
+    selection filters win on mild damage, gain filters on severe;
+    residuals from both families carry different information about the
+    same frame.
 
 ## 10. Repository map
 
@@ -398,13 +497,22 @@ adaptive_filters/
   artifacts.py      9-artifact simulation suite
   bitstream.py      real H.264 encode/corrupt/decode (no-deblock, -ec 1)
   io.py / vmaf.py / dataset.py / pipeline.py / naturalness.py / fusion.py
-models/wiener.pt    CURRENT trained filter (color, gmax=4, 24 epochs,
-                    6000 simulator + 3000 real-H.264 pairs)
-train_wiener.py     trainer (+ validation);  train_kmap.py / train_kdct.py
+models/
+  wiener4_dvc.pt    PRODUCTION probe: gen-4 affine + U-Net, trained on
+                    ~90 BVI-DVC contents (the robust checkpoint)
+  wiener4_c.pt / wiener4_a.pt   gen-4 on 9 scenes / keyhole negative control
+  wiener.pt         gen-3 gain-only baseline (fastest)
+  wiener_b/c.pt     gen-3 context-ablation variants
+  kmap.pt / kmap_restore.pt / kdct.pt   generations 2 and 1
+train_wiener.py     trainer (+ validation); --arch a|b|c, --affine,
+                    --pristine-dir for large corpora
+train_kmap.py / train_kdct.py   earlier-generation trainers
 inspect_filter.py   visual inspection (input/filtered/residual/K-map PNGs)
 validate_artifacts.py  probe-bank artifact matrix (regression gate)
 stress_test.py      15-ladder Wiener-standalone stress campaign
 compare_vmaf.py     single-probe VMAF head-to-head (lwn vs dct vs fdct)
+compare_context.py  receptive-field ablation (baseline/dilated/U-Net)
+compare_generations.py  all checkpoints on identical degraded images
 demo.py             end-to-end synthetic smoke test
 build_dataset.py / train_fusion.py / score_video.py   VQA pipeline CLIs
 ```
@@ -573,9 +681,11 @@ A 7-stage path for reimplementing the generation-3 filter from scratch
   (hash content features → per-bucket learned filters; the offline-trained
   cousin of ALF and of our learned θ estimator).
 - **Our differentiators against all of the above**: the residual (not the
-  restored image) is the product; the gain/K field is read back as a
-  feature channel; training includes real corrupted H.264 with concealment;
-  and the target is a quality index, not restoration quality.
+  restored image) is the product; the gain/K/t fields are read back as
+  feature channels — in particular the **synthesis-effort (damage) map**,
+  which appears unpublished as a no-reference quality signal; training
+  includes real corrupted H.264 with concealment; and the target is a
+  quality index, not restoration quality.
 
 ### B.6 Supporting results
 

@@ -259,8 +259,29 @@ percentiles (most blocks need nothing; the hurt ones shout), exactly like
 our worst-tile residual statistics. To our knowledge, using this
 synthesis-effort map as a no-reference quality signal is novel.
 
-**Status.** `models/wiener4_c.pt` (U-Net + affine) is the richest probe;
-`wiener4_a.pt` is the keyhole negative control, kept as evidence.
+**The robust upgrade (gen4_robust).** The first gen-4 model learned
+"what natural video looks like" from only 9 scenes — a narrow education.
+We retrained the *identical* model (same architecture, same prices, same
+guardrails) on crops streamed from ~90 different source videos (the
+BVI-DVC collection: sports, faces, water, textures, streets), 11,200
+training pairs in total. The effect was exactly what a broader education
+should give:
+
+- **The damage map matured.** With 9 scenes, only the map's loudest spots
+  tracked damage severity; with 90 scenes, even its plain *average* is
+  perfectly ordered with severity. The model's sense of "natural" became
+  broad enough to be trusted everywhere.
+- **The numbers became honest.** The earlier models were tested on the
+  same content family they trained on — a home-field advantage. The
+  robust model was tested on content it had *never seen* and still
+  produced the best measurements of any checkpoint in the project
+  (13 of 19 perfectly ordered). It gave up ~1 dB of in-domain picture
+  polish in exchange — the classic signature of less memorizing and more
+  understanding, and the right trade for a measuring instrument.
+
+**Status.** `models/wiener4_dvc.pt` (robust) is the production probe.
+`wiener4_c.pt` is the 9-scene version, `wiener4_a.pt` the keyhole
+negative control — both kept as evidence.
 
 ## 7. Side by side
 
@@ -273,6 +294,17 @@ synthesis-effort map as a no-reference quality signal is novel.
 | Can restore? | no (deletes only) | no (deletes only) | partially (reweighs) | yes, within its tax budget |
 | Signature finding | ΔK sign = damage type | lost_edge1; selection can't restore | 3× better VMAF calibration than classical | t needs context; damage map |
 | Fatal trap avoided | — | fixed-threshold pathology | sigmoid collapse | t dying / t hallucinating |
+| Monotone features (same ladder, same frame) | 6 | 9–10 | 7 | 8 (9 scenes) → **13 (robust, 90 scenes)** |
+
+**How the generations divide the work** (measured on identical degraded
+images): the selection filters (gens 1–2) are *gentle preservers* — most
+faithful when damage is mild, because keep/drop cannot hurt what it
+keeps. The gain filters (gens 3–4) are *aggressive restorers* — clearly
+best when damage is severe (+6–7 dB on heavy noise), at the cost of
+over-cleaning nearly-clean input. No generation dominates; they are
+complementary instruments, and the strongest measurement setup pairs the
+robust gen-4 with the best selection filter (gen-2 restore-trained) so
+their different residuals are read side by side.
 
 ## 8. The experiments, explained simply
 
@@ -296,7 +328,11 @@ Each harness answers one question and can be re-run anytime:
   against real VMAF on content never seen in training.
 - **`compare_context.py`** — *does a wider view help?* Same filter,
   three fields of view, judged on restoration accuracy and measurement
-  orderliness.
+  orderliness. (Answer: not for gains; decisively yes for synthesis.)
+- **`compare_generations.py`** — *how do all the generations behave on
+  the very same damaged images?* Six checkpoints, seven artifact types,
+  restoration accuracy plus measurement orderliness in one table. This
+  is where the preserver-vs-restorer division of labor was measured.
 
 Two testing principles used everywhere, both worth stealing:
 **(1) content-grouped splits** — frames from one source video never
