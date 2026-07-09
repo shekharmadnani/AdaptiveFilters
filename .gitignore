@@ -11,3 +11,6 @@ examples/demo_data/
 
 # Filter inspection outputs (regenerate with inspect_filter.py)
 out_inspect*/
+
+# training run logs
+*_log.txt

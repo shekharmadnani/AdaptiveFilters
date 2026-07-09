@@ -19,7 +19,7 @@ import time
 import numpy as np
 import torch
 
-from adaptive_filters.learned.wiener import WienerDctModel, wiener_loss, save_model
+from adaptive_filters.learned.wiener import build_model, wiener_loss, save_model
 from adaptive_filters.learned.kdct import pick_device
 from adaptive_filters.learned.patches import (
     gather_frames, sample_patches, make_degraded, gather_h264_crops,
@@ -41,8 +41,9 @@ def train(args):
                            seed=args.seed)
     print(f"Training crops: {crops.shape}  (N, C, H, W)")
 
-    model = WienerDctModel(lam_rate=args.lam_rate, in_channels=3,
-                           gmax=args.gmax).to(device)
+    model = build_model(arch=args.arch, lam_rate=args.lam_rate,
+                        in_channels=3, gmax=args.gmax,
+                        affine=args.affine, tmax=args.tmax).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=1e-3)
 
     if args.naturalness:
@@ -80,16 +81,19 @@ def train(args):
             batch = data[idx].to(device)
             tgt = targets[idx].to(device) if targets is not None else None
             loss, logs = wiener_loss(model, batch, target=tgt,
-                                     w_e1=args.w_e1, w_e2=args.w_e2)
+                                     w_e1=args.w_e1, w_e2=args.w_e2,
+                                     mu=args.mu)
             opt.zero_grad()
             loss.backward()
             opt.step()
             for kk, v in logs.items():
                 acc[kk] = acc.get(kk, 0.0) + v / steps
+        t_str = (f"  t_abs={acc['t_abs']:.4f}  t_act={acc['t_active']:.3f}"
+                 if "t_abs" in acc else "")
         print(f"epoch {epoch + 1:2d}/{args.epochs}  "
               f"loss={acc['loss']:.5f}  recon={acc['recon']:.5f}  "
               f"Kg={acc['k_mean']:5.1f}  g_mean={acc['g_mean']:.3f}  "
-              f"g>1={acc['g_over1']:.3f}  tv1={acc['tv1']:.4f}  "
+              f"g>1={acc['g_over1']:.3f}  tv1={acc['tv1']:.4f}{t_str}  "
               f"({time.time() - t0:.1f}s)")
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
@@ -159,6 +163,16 @@ def main():
     ap.add_argument("--gmax", type=float, default=4.0,
                     help="upper bound of the coefficient gains (>1 allows "
                          "amplification)")
+    ap.add_argument("--arch", default="a", choices=["a", "b", "c"],
+                    help="a: baseline trunk (~40px view); b: + dilated "
+                         "stack (~260px); c: + U-Net deep branch "
+                         "(whole-crop view; pair with --crop-size 256)")
+    ap.add_argument("--affine", action="store_true",
+                    help="gen-4: X_hat = g*X + t (adds the synthesis head)")
+    ap.add_argument("--mu", type=float, default=0.02,
+                    help="L1 price on t (synthesis); higher = sparser t")
+    ap.add_argument("--tmax", type=float, default=1.0,
+                    help="bound of the synthesis term |t| <= tmax")
     ap.add_argument("--w-e1", type=float, default=0.05)
     ap.add_argument("--w-e2", type=float, default=0.05)
     ap.add_argument("--naturalness", action="store_true",
