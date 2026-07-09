@@ -4,6 +4,10 @@
 > the complete design history with explanations, all experimental results,
 > lessons learned, and an annotated bibliography (papers, tutorials,
 > reference codebases) supporting every technique used here.
+>
+> **Plain-language guide**: [docs/THE_FOUR_FILTERS.md](docs/THE_FOUR_FILTERS.md) —
+> the four learned-filter generations explained simply: ideas, methods,
+> experiments, lessons, literature, and a glossary.
 
 A NumPy-only prototype of the design discussed in the planning sessions:
 a bank of **content-adaptive filters** whose parameters are blindly estimated
