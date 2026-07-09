@@ -55,6 +55,60 @@ def gather_frames(bvi_dir=None, frames_per_video=5, frame_stride=60,
     return frames
 
 
+def gather_crops_dir(video_dir, n, size=256, seed=0, frames_per_video=2,
+                     frame_stride=25, first_frame=5, max_videos=None,
+                     verbose=True):
+    """Streaming pristine color crops from EVERY video in a directory
+    (any resolution -- built for large corpora like BVI-DVC).
+
+    Decodes only a few sparse frames per clip, crops immediately, keeps
+    uint8 (memory stays flat regardless of corpus size). Returns
+    (n, 3, size, size) uint8.
+    """
+    from ..io import iter_ffmpeg_color
+
+    files = sorted(os.path.join(video_dir, f) for f in os.listdir(video_dir)
+                   if f.lower().endswith(".mp4"))
+    if not files:
+        return None
+    rng = np.random.default_rng(seed + 313)
+    if max_videos and len(files) > max_videos:
+        idx = np.linspace(0, len(files) - 1, max_videos).astype(int)
+        files = [files[i] for i in idx]
+
+    out = np.empty((n, 3, size, size), dtype=np.uint8)
+    per_frame = max(1, int(np.ceil(n / (len(files) * frames_per_video))))
+    last_idx = first_frame + frame_stride * (frames_per_video - 1)
+    filled = 0
+    for vi, path in enumerate(files):
+        if filled >= n:
+            break
+        taken = 0
+        try:
+            for fi, frame in enumerate(iter_ffmpeg_color(path)):
+                if fi >= first_frame and (fi - first_frame) % frame_stride == 0:
+                    h, w = frame.shape[:2]
+                    for _ in range(per_frame):
+                        if filled >= n:
+                            break
+                        y0 = int(rng.integers(0, (h - size) // 8 + 1)) * 8
+                        x0 = int(rng.integers(0, (w - size) // 8 + 1)) * 8
+                        out[filled] = frame[y0:y0 + size, x0:x0 + size] \
+                            .transpose(2, 0, 1)
+                        filled += 1
+                    taken += 1
+                if taken >= frames_per_video or fi >= last_idx or filled >= n:
+                    break
+        except Exception as e:  # skip unreadable clips, keep going
+            if verbose:
+                print(f"  skip {os.path.basename(path)}: {e}")
+            continue
+        if verbose and (vi % 20 == 0 or filled >= n):
+            print(f"  [{vi + 1}/{len(files)}] {os.path.basename(path)}"
+                  f" -> {filled}/{n} crops")
+    return out[:filled]
+
+
 def synthetic_color_frame(seed, size=512):
     """uint8 (H, W, 3) synthetic YUV-like frame: structured luma, smoother
     correlated chroma (synthetic fallback / validation only)."""
@@ -182,12 +236,26 @@ def make_degraded(pristine, seed=0, clean_frac=0.15,
     (n, C, s, s) are degraded per channel with the SAME seed so the
     artifact geometry (bands, blocks) is spatially consistent across
     channels, as it is in real transmission errors.
+
+    Accepts float32 crops in [0,1] OR uint8 crops in [0,255]; output
+    matches the input dtype (uint8 path converts per crop, so no large
+    float arrays are ever materialized -- needed for big corpora).
     """
     from ..artifacts import apply_artifact
 
     rng = np.random.default_rng(seed + 555)
+    is_u8 = pristine.dtype == np.uint8
     out = np.empty_like(pristine)
     color = pristine.ndim == 4
+    scale = 1.0 if is_u8 else 255.0
+
+    def _apply(plane, name, sev, s):
+        deg = apply_artifact(name, plane.astype(np.float64) * scale,
+                             sev, seed=s)
+        if is_u8:
+            return np.clip(deg + 0.5, 0, 255).astype(np.uint8)
+        return np.clip(deg / 255.0, 0.0, 1.0)
+
     for i in range(len(pristine)):
         if rng.random() < clean_frac:
             out[i] = pristine[i]
@@ -196,12 +264,7 @@ def make_degraded(pristine, seed=0, clean_frac=0.15,
         sev = int(rng.integers(1, 6))
         if color:
             for c in range(pristine.shape[1]):
-                out[i, c] = np.clip(
-                    apply_artifact(name,
-                                   pristine[i, c].astype(np.float64) * 255.0,
-                                   sev, seed=seed + i) / 255.0, 0.0, 1.0)
+                out[i, c] = _apply(pristine[i, c], name, sev, seed + i)
         else:
-            out[i] = np.clip(
-                apply_artifact(name, pristine[i].astype(np.float64) * 255.0,
-                               sev, seed=seed + i) / 255.0, 0.0, 1.0)
+            out[i] = _apply(pristine[i], name, sev, seed + i)
     return out

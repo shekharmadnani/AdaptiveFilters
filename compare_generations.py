@@ -44,13 +44,17 @@ def build_probes():
     from adaptive_filters.probes.learned_wiener_probe import LearnedWienerProbe
 
     m = os.path.join("models", "")
-    return {
+    probes = {
         "gen1_kdct": (LearnedDctProbe(m + "kdct.pt"), "gray"),
         "gen2_kmap": (LearnedKMapProbe(m + "kmap.pt"), "gray"),
         "gen2_restore": (LearnedKMapProbe(m + "kmap_restore.pt"), "gray"),
         "gen3_wiener": (LearnedWienerProbe(m + "wiener.pt"), "color"),
         "gen4_affine": (LearnedWienerProbe(m + "wiener4_c.pt"), "color"),
     }
+    if os.path.exists(m + "wiener4_dvc.pt"):  # robust (BVI-DVC corpus)
+        probes["gen4_robust"] = (LearnedWienerProbe(m + "wiener4_dvc.pt"),
+                                 "color")
+    return probes
 
 
 def probe_input(frame_color, mode):

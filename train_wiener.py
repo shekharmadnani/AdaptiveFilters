@@ -23,6 +23,7 @@ from adaptive_filters.learned.wiener import build_model, wiener_loss, save_model
 from adaptive_filters.learned.kdct import pick_device
 from adaptive_filters.learned.patches import (
     gather_frames, sample_patches, make_degraded, gather_h264_crops,
+    gather_crops_dir,
 )
 from adaptive_filters.synthetic import make_frame, jpeg_like
 from adaptive_filters.features.stats import spearman
@@ -34,12 +35,21 @@ def train(args):
     device = pick_device(args.device)
     print(f"Device: {device}")
 
-    print("Gathering pristine frames (color)...")
-    frames = gather_frames(args.bvi if os.path.isdir(args.bvi) else None,
-                           color=True)
-    crops = sample_patches(frames, args.crops, size=args.crop_size,
-                           seed=args.seed)
-    print(f"Training crops: {crops.shape}  (N, C, H, W)")
+    if args.pristine_dir and os.path.isdir(args.pristine_dir):
+        print(f"Gathering pristine crops from {args.pristine_dir} "
+              f"(streaming, up to {args.max_videos} videos)...")
+        crops = gather_crops_dir(args.pristine_dir, args.crops,
+                                 size=args.crop_size, seed=args.seed,
+                                 max_videos=args.max_videos)
+        print(f"Training crops: {crops.shape} uint8, "
+              f"~{args.max_videos} source contents")
+    else:
+        print("Gathering pristine frames (color)...")
+        frames = gather_frames(args.bvi if os.path.isdir(args.bvi) else None,
+                               color=True)
+        crops = sample_patches(frames, args.crops, size=args.crop_size,
+                               seed=args.seed)
+        print(f"Training crops: {crops.shape}  (N, C, H, W)")
 
     model = build_model(arch=args.arch, lam_rate=args.lam_rate,
                         in_channels=3, gmax=args.gmax,
@@ -62,6 +72,9 @@ def train(args):
                                      seed=args.seed, color=True)
             if h264 is not None:
                 ph, dh = h264
+                if pris_all.dtype == np.uint8:  # match corpus storage
+                    ph = np.clip(ph * 255.0 + 0.5, 0, 255).astype(np.uint8)
+                    dh = np.clip(dh * 255.0 + 0.5, 0, 255).astype(np.uint8)
                 pris_all = np.concatenate([pris_all, ph])
                 deg_all = np.concatenate([deg_all, dh])
                 print(f"Total pairs: {len(pris_all)} "
@@ -79,7 +92,11 @@ def train(args):
         for s in range(steps):
             idx = order[s * args.batch : (s + 1) * args.batch]
             batch = data[idx].to(device)
+            if batch.dtype == torch.uint8:
+                batch = batch.float().div_(255.0)
             tgt = targets[idx].to(device) if targets is not None else None
+            if tgt is not None and tgt.dtype == torch.uint8:
+                tgt = tgt.float().div_(255.0)
             loss, logs = wiener_loss(model, batch, target=tgt,
                                      w_e1=args.w_e1, w_e2=args.w_e2,
                                      mu=args.mu)
@@ -180,6 +197,12 @@ def main():
     ap.add_argument("--h264-frac", type=float, default=0.5,
                     help="real-H.264 pairs as a fraction of --crops "
                          "(paired mode only; 0 disables)")
+    ap.add_argument("--pristine-dir", default=None,
+                    help="directory of pristine videos for the crop corpus "
+                         "(e.g. BVI-DVC Videos); streams crops in uint8, "
+                         "overrides the BVI-CC1 frame pool")
+    ap.add_argument("--max-videos", type=int, default=90,
+                    help="cap on videos sampled from --pristine-dir")
     ap.add_argument("--device", default=None)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--skip-train", action="store_true")
