@@ -109,6 +109,61 @@ def gather_crops_dir(video_dir, n, size=256, seed=0, frames_per_video=2,
     return out[:filled]
 
 
+def load_pairs_dir(pairs_dir, n, size=256, seed=0, family=None,
+                   verbose=True):
+    """Load (pristine, degraded) patch pairs from a generate_pairs.py
+    dataset. Patches are stored 256x256; a smaller `size` takes a random
+    8-aligned sub-crop (this is how gen-1/2/3 sizes come from the same
+    dataset). family: 'compression', 'loss', or None for both.
+
+    Returns (pris, deg): (n, 3, size, size) uint8 each, shuffled.
+    """
+    import json
+
+    with open(os.path.join(pairs_dir, "manifest.json"), encoding="utf-8") as f:
+        manifest = json.load(f)
+    if family:
+        manifest = [e for e in manifest if e["family"] == family]
+    rng = np.random.default_rng(seed + 77)
+    rng.shuffle(manifest)
+
+    ps, ds = [], []
+    got = 0
+    for e in manifest:
+        if got >= n:
+            break
+        z = np.load(os.path.join(pairs_dir, e["shard"]))
+        p, d = z["pris"], z["deg"]
+        take = min(len(p), n - got)
+        ps.append(p[:take])
+        ds.append(d[:take])
+        got += take
+    if not ps:
+        raise FileNotFoundError(f"no pairs found in {pairs_dir}")
+    pris = np.concatenate(ps)
+    deg = np.concatenate(ds)
+    order = rng.permutation(len(pris))
+    pris, deg = pris[order], deg[order]
+
+    stored = pris.shape[-1]
+    if size < stored:
+        out_p = np.empty((len(pris), 3, size, size), np.uint8)
+        out_d = np.empty_like(out_p)
+        for i in range(len(pris)):
+            y0 = int(rng.integers(0, (stored - size) // 8 + 1)) * 8
+            x0 = int(rng.integers(0, (stored - size) // 8 + 1)) * 8
+            out_p[i] = pris[i, :, y0:y0 + size, x0:x0 + size]
+            out_d[i] = deg[i, :, y0:y0 + size, x0:x0 + size]
+        pris, deg = out_p, out_d
+    if verbose:
+        fams = {}
+        for e in manifest:
+            fams[e["family"]] = fams.get(e["family"], 0) + e["n"]
+        print(f"  pairs dataset: loaded {len(pris)} of {sum(fams.values())} "
+              f"available {dict(fams)}")
+    return pris, deg
+
+
 def synthetic_color_frame(seed, size=512):
     """uint8 (H, W, 3) synthetic YUV-like frame: structured luma, smoother
     correlated chroma (synthetic fallback / validation only)."""

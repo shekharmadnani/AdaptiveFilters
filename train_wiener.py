@@ -23,7 +23,7 @@ from adaptive_filters.learned.wiener import build_model, wiener_loss, save_model
 from adaptive_filters.learned.kdct import pick_device
 from adaptive_filters.learned.patches import (
     gather_frames, sample_patches, make_degraded, gather_h264_crops,
-    gather_crops_dir,
+    gather_crops_dir, load_pairs_dir,
 )
 from adaptive_filters.synthetic import make_frame, jpeg_like
 from adaptive_filters.features.stats import spearman
@@ -34,6 +34,23 @@ DEFAULT_BVI = r"F:\DVI\BVI-CC1\ORIG_MP4"
 def train(args):
     device = pick_device(args.device)
     print(f"Device: {device}")
+
+    if args.pairs_dir:
+        # pre-generated real-codec pairs (generate_pairs.py):
+        # H.264/HEVC/MPEG-2 compression + packet-loss families
+        print(f"Loading pre-generated pairs from {args.pairs_dir}...")
+        pris_all, deg_all = load_pairs_dir(args.pairs_dir, args.crops,
+                                           size=args.crop_size,
+                                           seed=args.seed,
+                                           family=args.pairs_family)
+        model = build_model(arch=args.arch, lam_rate=args.lam_rate,
+                            in_channels=3, gmax=args.gmax,
+                            affine=args.affine, tmax=args.tmax).to(device)
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        data = torch.from_numpy(deg_all)
+        targets = torch.from_numpy(pris_all)
+        _train_loop(args, model, opt, data, targets, device)
+        return
 
     if args.pristine_dir and os.path.isdir(args.pristine_dir):
         print(f"Gathering pristine crops from {args.pristine_dir} "
@@ -82,6 +99,10 @@ def train(args):
         data = torch.from_numpy(deg_all)
         targets = torch.from_numpy(pris_all)
 
+    _train_loop(args, model, opt, data, targets, device)
+
+
+def _train_loop(args, model, opt, data, targets, device):
     rng = np.random.default_rng(args.seed)
     n_data = len(data)
     steps = max(1, n_data // args.batch)
@@ -114,7 +135,7 @@ def train(args):
               f"({time.time() - t0:.1f}s)")
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
-    save_model(model, args.out, extra={"crops": len(crops),
+    save_model(model, args.out, extra={"pairs": n_data,
                                        "paired": not args.naturalness})
     print(f"Saved -> {args.out}")
 
@@ -203,6 +224,13 @@ def main():
                          "overrides the BVI-CC1 frame pool")
     ap.add_argument("--max-videos", type=int, default=90,
                     help="cap on videos sampled from --pristine-dir")
+    ap.add_argument("--pairs-dir", default=None,
+                    help="pre-generated real-codec pair dataset from "
+                         "generate_pairs.py (overrides all other data "
+                         "sources)")
+    ap.add_argument("--pairs-family", default=None,
+                    choices=[None, "compression", "loss"],
+                    help="restrict --pairs-dir to one family")
     ap.add_argument("--device", default=None)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--skip-train", action="store_true")

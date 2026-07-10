@@ -54,6 +54,9 @@ def build_probes():
     if os.path.exists(m + "wiener4_dvc.pt"):  # robust (BVI-DVC corpus)
         probes["gen4_robust"] = (LearnedWienerProbe(m + "wiener4_dvc.pt"),
                                  "color")
+    if os.path.exists(m + "wiener4_pairs.pt"):  # 3-codec real pairs
+        probes["gen4_pairs"] = (LearnedWienerProbe(m + "wiener4_pairs.pt"),
+                                "color")
     return probes
 
 
