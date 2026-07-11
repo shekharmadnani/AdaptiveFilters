@@ -99,6 +99,51 @@ class WienerDctModel(nn.Module):
         return g, t
 
 
+class TransformerNeck(nn.Module):
+    """Global self-attention at the /32 bottleneck: each low-resolution
+    token can RETRIEVE information from anywhere in the frame (non-local
+    self-similarity -- the learned form of the BM3D insight), instead of
+    the U-Net's static regional summary.
+
+    Full attention is affordable here because the /32 grid is tiny
+    (256-crop -> 64 tokens; 1080p -> ~2,000 tokens). Learned 2-D position
+    embeddings are bilinearly interpolated to the actual grid, so the
+    module is resolution-independent (train on crops, infer full-frame).
+    """
+
+    def __init__(self, dim=128, depth=4, heads=4, mlp_ratio=2.0,
+                 train_grid=(8, 8)):
+        super().__init__()
+        import torch.nn.functional  # noqa: F401  (used in forward)
+
+        self.pos = nn.Parameter(
+            torch.zeros(1, dim, train_grid[0], train_grid[1]))
+        nn.init.trunc_normal_(self.pos, std=0.02)
+        self.blocks = nn.ModuleList()
+        for _ in range(depth):
+            self.blocks.append(nn.ModuleDict({
+                "ln1": nn.LayerNorm(dim),
+                "attn": nn.MultiheadAttention(dim, heads, batch_first=True),
+                "ln2": nn.LayerNorm(dim),
+                "mlp": nn.Sequential(
+                    nn.Linear(dim, int(dim * mlp_ratio)), nn.GELU(),
+                    nn.Linear(int(dim * mlp_ratio), dim)),
+            }))
+
+    def forward(self, x):                       # (B, dim, h, w)
+        import torch.nn.functional as F
+
+        b, d, h, w = x.shape
+        pos = F.interpolate(self.pos, size=(h, w), mode="bilinear",
+                            align_corners=False)
+        t = (x + pos).flatten(2).transpose(1, 2)  # (B, N, dim)
+        for blk in self.blocks:
+            y = blk["ln1"](t)
+            t = t + blk["attn"](y, y, y, need_weights=False)[0]
+            t = t + blk["mlp"](blk["ln2"](t))
+        return t.transpose(1, 2).reshape(b, d, h, w)
+
+
 class WienerDctModelV2(nn.Module):
     """Context-widened variants (the receptive-field ablation).
 
@@ -112,6 +157,11 @@ class WienerDctModelV2(nn.Module):
               the analysis/synthesis pyramid with detail subbands carried
               around the bottleneck). Big-picture context for synthesis,
               fine detail preserved for gain decisions.
+    arch="d": arch c with the /32 bottleneck processed by GLOBAL
+              self-attention (TransformerNeck) instead of a convolution --
+              isolates exactly one question: does learned RETRIEVAL beat
+              the U-Net's static regional summary? Everything else
+              (stem, skips, heads, losses) is identical to arch c.
 
     Same forward contract as WienerDctModel: (B,C,H,W) -> gains
     (B,C,N,8,8) in [0,gmax], DC pinned to 1.
@@ -120,7 +170,7 @@ class WienerDctModelV2(nn.Module):
     def __init__(self, lam_rate=2.5e-3, channels=32, in_channels=3,
                  gmax=4.0, arch="b", affine=False, tmax=1.0):
         super().__init__()
-        assert arch in ("b", "c")
+        assert arch in ("b", "c", "d")
         self.lam_rate = lam_rate
         self.in_channels = in_channels
         self.gmax = gmax
@@ -146,7 +196,7 @@ class WienerDctModelV2(nn.Module):
             nn.Conv2d(2 * c, 2 * c, 3, padding=4, dilation=4), r,
             nn.Conv2d(2 * c, 2 * c, 3, padding=8, dilation=8), r,
         )
-        if arch == "c":
+        if arch in ("c", "d"):
             self.down1 = nn.Sequential(                 # /16
                 nn.MaxPool2d(2), nn.Conv2d(2 * c, 4 * c, 3, padding=1), r)
             self.down2 = nn.Sequential(                 # /32 (whole-crop view)
@@ -155,6 +205,8 @@ class WienerDctModelV2(nn.Module):
                 nn.Conv2d(8 * c, 2 * c, 3, padding=1), r)
             self.fuse8 = nn.Sequential(
                 nn.Conv2d(4 * c, 2 * c, 3, padding=1), r)
+        if arch == "d":
+            self.neck = TransformerNeck(dim=4 * c)      # retrieval at /32
         self.head = nn.Conv2d(2 * c, in_channels * 64, 1)
         nn.init.constant_(self.head.bias, -1.6)         # gains start ~0.7
         nn.init.normal_(self.head.weight, std=0.01)
@@ -168,9 +220,11 @@ class WienerDctModelV2(nn.Module):
 
         b, c = x.shape[0], self.in_channels
         f = self.dilated(self.stem(x))                  # fine, at block grid
-        if self.arch == "c":
+        if self.arch in ("c", "d"):
             g16 = self.down1(f)
             g32 = self.down2(g16)
+            if self.arch == "d":
+                g32 = self.neck(g32)                    # global retrieval
             u16 = F.interpolate(g32, size=g16.shape[-2:], mode="nearest")
             m16 = self.fuse16(torch.cat([u16, g16], dim=1))
             u8 = F.interpolate(m16, size=f.shape[-2:], mode="nearest")

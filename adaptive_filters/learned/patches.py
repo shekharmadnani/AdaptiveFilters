@@ -167,6 +167,28 @@ def load_pairs_dir(pairs_dir, n, size=256, seed=0, family=None,
     return pris[:got], deg[:got]
 
 
+def make_masked(pristine, mask_frac=0.4, tile=32, seed=0):
+    """MAE-style pretraining pairs from PRISTINE crops alone: cover a
+    random fraction of `tile`x`tile` squares with mid-gray; the network
+    must predict the hidden content from what remains -- which is exactly
+    the synthesis term's job. Needs no degraded data at all, so the
+    'textbook' is unlimited. Input/output dtype preserved (uint8/float)."""
+    rng = np.random.default_rng(seed + 1234)
+    is_u8 = pristine.dtype == np.uint8
+    fill = 128 if is_u8 else 0.5
+    out = pristine.copy()
+    n, _, h, w = pristine.shape
+    gh, gw = h // tile, w // tile
+    for i in range(n):
+        m = rng.random((gh, gw)) < mask_frac
+        for y in range(gh):
+            for x in range(gw):
+                if m[y, x]:
+                    out[i, :, y * tile:(y + 1) * tile,
+                        x * tile:(x + 1) * tile] = fill
+    return out
+
+
 def synthetic_color_frame(seed, size=512):
     """uint8 (H, W, 3) synthetic YUV-like frame: structured luma, smoother
     correlated chroma (synthetic fallback / validation only)."""
