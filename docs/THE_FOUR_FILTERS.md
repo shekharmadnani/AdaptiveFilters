@@ -283,6 +283,58 @@ should give:
 `wiener4_c.pt` is the 9-scene version, `wiener4_a.pt` the keyhole
 negative control — both kept as evidence.
 
+### The champion's three title defenses
+
+After the robust model was crowned, it was challenged three times by
+models trained on data that should, on paper, have beaten it. It won all
+three — and the pattern of those wins is the project's most important
+finding.
+
+**Challenge 1 — real codec damage.** We built a generator that takes
+clean clips and runs them through *real* encoders — H.264, HEVC, and
+MPEG-2, with randomized bitrates, profiles and encoder tools — and also
+through *real packet loss* (bytes corrupted inside the compressed stream,
+decoded with the decoder's own error concealment). 7,200 damage-realistic
+training pairs. The model trained on them (`gen4_pairs`) became the best
+*repairman* — best severe-noise and compression repair of any model — but
+its measurements were slightly less orderly than the champion's, and its
+harsh diet made it trigger-happy: it rewrites regions it distrusts even
+when they cannot be fixed.
+
+**Challenge 2 — the owner's own dataset.** A 44,000-folder image
+collection (each folder: a ground-truth photo plus 10 degraded versions
+spanning a bitrate ladder, each labeled with its VIF quality score). We
+extracted 40,820 patch pairs, held 12 folders out as untouched judges,
+and trained three in-domain models varying the invention tax μ. Judged on
+the held-out folders' own quality ladders: **the champion — which had
+never seen a single image from this dataset, and was even trained in a
+different color space — beat all three** (17 orderly measurements vs 16,
+13 and 11).
+
+**Challenge 3 — maybe they were just under-trained?** We reran the best
+in-domain recipe with 1.5× the data and 1.5× the epochs. It got *worse*
+(13 vs 16). More in-domain training made the model a better specialist in
+that dataset's damage and a worse judge of what natural content looks
+like — and judging naturalness is the whole job.
+
+**The lesson, in one sentence:** *the filter's power comes from knowing
+what NATURAL looks like, not from knowing the damage* — a broad education
+on clean content beats any amount of studying the disease. This is
+exactly what the project's theory said from the start; now it is measured
+three ways (across content type, damage source, and color space).
+
+### A hardware lesson worth keeping
+
+One training run froze the machine ("hung under heavy disk access"). The
+real cause was not the disk: the data loader briefly needed **twice** the
+dataset's memory while assembling it (28 GB on a 32 GB machine), Windows
+started swapping memory to disk, and everything stalled. Fixes now built
+in: the loader fills a pre-allocated block piece by piece (memory never
+spikes), big-data trainings cap at ~24k patches in RAM, and long runs
+execute at low CPU priority so the desktop always stays responsive. Rule
+of thumb: watch the *peak* memory of the loading step, not the size of
+the data.
+
 ## 7. Side by side
 
 | | Gen 1 (kdct) | Gen 2 (kmap) | Gen 3 (wiener) | Gen 4 (affine) |
@@ -333,6 +385,13 @@ Each harness answers one question and can be re-run anytime:
   the very same damaged images?* Six checkpoints, seven artifact types,
   restoration accuracy plus measurement orderliness in one table. This
   is where the preserver-vs-restorer division of labor was measured.
+- **`generate_pairs.py`** — *build real training data*: clean clips
+  through real H.264/HEVC/MPEG-2 encoders (randomized settings) and real
+  packet loss, saved as reusable patch-pair shards.
+- **`extract_binpairs.py` / `validate_binpairs.py`** — *use an external
+  GT-plus-degraded image collection*: a resumable network extractor, and
+  a judge that scores any checkpoint on held-out folders' own quality
+  ladders (this is the harness the champion defended its title on).
 
 Two testing principles used everywhere, both worth stealing:
 **(1) content-grouped splits** — frames from one source video never

@@ -358,6 +358,38 @@ For **stress testing only**, `encode_h264(deblock=True)` produces normal
 deblocked streams — blockiness the codec has already smoothed, the harder
 detection case.
 
+**Three-codec pair generator** (`pairgen.py` + `generate_pairs.py`):
+the scaled-up successor to the H.264-only pipeline. Two families, stored
+as reusable on-disk shards (256×256 uint8, one dataset serving every
+generation via sub-cropping):
+
+- *compression*: clean clips through real encoders with randomized
+  settings — H.264 (CRF 20–50, three profiles, deblock on/off, slices,
+  GOP, B-frames), HEVC (CRF 22–45, SAO on/off), MPEG-2 (qscale 4–31,
+  including intra-only — the digital-tape profile);
+- *loss*: the compressed stream additionally gets codec-aware packet
+  loss (byte flips inside slice payloads, with the correct NAL parsing
+  per codec; headers and random-access pictures kept intact so streams
+  stay decodable and frame-aligned), decoded with error resilience.
+
+Generated: 7,200 pairs, perfectly balanced across the six codec×family
+cells, every encoder configuration recorded in the manifest.
+
+**External dataset integration** (`binpairs.py` + `extract_binpairs.py`):
+a resumable extractor for GT-plus-degraded image collections (built for
+the BinResults share: 44,209 folders, each GT.png + 10 bitrate-ladder
+degradations with VIF labels). Extracted 40,820 patch pairs with
+per-patch bin and VIF labels; 12 folders reserved as held-out judges
+(`validate_binpairs.py` scores any checkpoint on their own VIF ladders).
+
+**Resource lesson (machine-hang fix)**: the original pair loader
+concatenated shard arrays, briefly needing ~2× the dataset in RAM
+(≈28 GB on the 32 GB machine) — Windows paged to disk and the machine
+appeared hung. The loader is now memory-flat (preallocate + fill; peak =
+dataset + one shard), in-RAM pairs are capped at ~24k at 256px, and long
+trainings run at BelowNormal process priority. Watch the loading step's
+*peak* memory, not the dataset's size.
+
 ## 8. Experimental results
 
 ### 8.1 Severity-ladder validation (JPEG ladder, real + synthetic content)
@@ -425,7 +457,33 @@ wiener, gen4 affine, gen4 robust) on the same degraded real frame,
   gen2-restore (best selection-family probe) — the companion-residuals
   ensemble.
 
-### 8.6 Stress campaign (15 severity ladders, Wiener standalone)
+### 8.6 The champion's three defenses (final model selection)
+
+After gen4_robust was crowned, three challengers trained on
+better-looking data tried to take the title. All three lost:
+
+1. **gen4_pairs** (7,200 real three-codec pairs incl. packet loss): the
+   best *restorer* of any model — best severe-noise (34.1 dB) and best
+   gain-family compression repair — but 12 monotone features to the
+   champion's 13, plus a diet-induced quirk (rewrites unfixable regions),
+   and its evaluation carried partial home-field advantage.
+2. **BinResults μ sweep** (in-domain, 16k pairs each, μ ∈ {.01,.02,.04}):
+   judged on 11 held-out folders' own VIF ladders — champion 17/19
+   strong features vs 16 (μ=.04), 13 (μ=.01), 11 (μ=.02). The champion
+   had never seen a BinResults image and ran in a different color space.
+3. **Full-budget in-domain run** (24k pairs, 36 epochs): got *worse*
+   (13/19) — more in-domain training specialized the model on that
+   dataset's damage at the expense of judging naturalness.
+
+Conclusion, now measured across content type, damage source and color
+space: **broad pristine-content diversity beats damage specialization
+for probe quality** — the filter's power is knowing what natural looks
+like, exactly as the framework in Section 2 predicts. `wiener4_dvc.pt`
+is the confirmed production probe. Side finding: training-log intuition
+misjudged the sweep (μ=.04 looked over-taxed in the logs but won the
+sweep on held-out data) — only held-out ladders decide.
+
+### 8.7 Stress campaign (15 severity ladders, Wiener standalone)
 
 All 15 conditions pass (≥ 1 feature \|SRCC\| ≥ 0.9):
 
@@ -485,6 +543,17 @@ All 15 conditions pass (≥ 1 feature \|SRCC\| ≥ 0.9):
     selection filters win on mild damage, gain filters on severe;
     residuals from both families carry different information about the
     same frame.
+16. **Knowing "natural" beats knowing the damage** — in-domain training
+    on the target dataset's own degradations lost to the broadly-educated
+    champion three times, at two budgets; more in-domain epochs made it
+    worse. Invest in pristine diversity, not damage specialization.
+17. **Watch peak memory, not dataset size** — a concatenate-based loader
+    briefly doubles memory and can page a 32 GB machine into a hang;
+    preallocate-and-fill keeps loading memory-flat. Cap in-RAM pairs and
+    run long jobs at reduced process priority.
+18. **Only held-out ladders decide** — training-log intuition misread the
+    μ sweep (the "over-taxed" run won); model selection must come from
+    held-out, same-domain severity ladders, never from loss curves.
 
 ## 10. Repository map
 
@@ -498,8 +567,11 @@ adaptive_filters/
   bitstream.py      real H.264 encode/corrupt/decode (no-deblock, -ec 1)
   io.py / vmaf.py / dataset.py / pipeline.py / naturalness.py / fusion.py
 models/
-  wiener4_dvc.pt    PRODUCTION probe: gen-4 affine + U-Net, trained on
-                    ~90 BVI-DVC contents (the robust checkpoint)
+  wiener4_dvc.pt    PRODUCTION probe: gen-4 affine + U-Net, ~90 BVI-DVC
+                    contents -- confirmed champion after three challenges
+  wiener4_pairs.pt  gen-4 on real 3-codec pairs (best restorer)
+  wiener4_bin_*.pt  BinResults in-domain sweep + full-budget run
+                    (recorded evidence that specialization lost)
   wiener4_c.pt / wiener4_a.pt   gen-4 on 9 scenes / keyhole negative control
   wiener.pt         gen-3 gain-only baseline (fastest)
   wiener_b/c.pt     gen-3 context-ablation variants
@@ -513,6 +585,9 @@ stress_test.py      15-ladder Wiener-standalone stress campaign
 compare_vmaf.py     single-probe VMAF head-to-head (lwn vs dct vs fdct)
 compare_context.py  receptive-field ablation (baseline/dilated/U-Net)
 compare_generations.py  all checkpoints on identical degraded images
+generate_pairs.py   real 3-codec + packet-loss pair dataset generator
+extract_binpairs.py / validate_binpairs.py  external GT-dataset extractor
+                    and held-out VIF-ladder model selection
 demo.py             end-to-end synthetic smoke test
 build_dataset.py / train_fusion.py / score_video.py   VQA pipeline CLIs
 ```
