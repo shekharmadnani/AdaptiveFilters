@@ -127,41 +127,44 @@ def load_pairs_dir(pairs_dir, n, size=256, seed=0, family=None,
     rng = np.random.default_rng(seed + 77)
     rng.shuffle(manifest)
 
-    ps, ds = [], []
+    # MEMORY-FLAT loading: preallocate the final arrays and fill shard by
+    # shard (peak = final size + ONE shard). The previous concatenate-based
+    # version peaked at ~2x the dataset size, which on a 32 GB machine
+    # pushed Windows into paging (machine appears hung under disk load).
+    # No global permutation either -- the training loop reshuffles every
+    # epoch; shard order is already randomized above.
+    n_avail = sum(e["n"] for e in manifest)
+    n = min(n, n_avail)
+    if n == 0:
+        raise FileNotFoundError(f"no pairs found in {pairs_dir}")
+    pris = np.empty((n, 3, size, size), dtype=np.uint8)
+    deg = np.empty_like(pris)
+
     got = 0
     for e in manifest:
         if got >= n:
             break
         z = np.load(os.path.join(pairs_dir, e["shard"]))
         p, d = z["pris"], z["deg"]
+        stored = p.shape[-1]
         take = min(len(p), n - got)
-        ps.append(p[:take])
-        ds.append(d[:take])
+        if size == stored:
+            pris[got : got + take] = p[:take]
+            deg[got : got + take] = d[:take]
+        else:  # random 8-aligned sub-crop, done per pair while filling
+            for i in range(take):
+                y0 = int(rng.integers(0, (stored - size) // 8 + 1)) * 8
+                x0 = int(rng.integers(0, (stored - size) // 8 + 1)) * 8
+                pris[got + i] = p[i, :, y0:y0 + size, x0:x0 + size]
+                deg[got + i] = d[i, :, y0:y0 + size, x0:x0 + size]
         got += take
-    if not ps:
-        raise FileNotFoundError(f"no pairs found in {pairs_dir}")
-    pris = np.concatenate(ps)
-    deg = np.concatenate(ds)
-    order = rng.permutation(len(pris))
-    pris, deg = pris[order], deg[order]
-
-    stored = pris.shape[-1]
-    if size < stored:
-        out_p = np.empty((len(pris), 3, size, size), np.uint8)
-        out_d = np.empty_like(out_p)
-        for i in range(len(pris)):
-            y0 = int(rng.integers(0, (stored - size) // 8 + 1)) * 8
-            x0 = int(rng.integers(0, (stored - size) // 8 + 1)) * 8
-            out_p[i] = pris[i, :, y0:y0 + size, x0:x0 + size]
-            out_d[i] = deg[i, :, y0:y0 + size, x0:x0 + size]
-        pris, deg = out_p, out_d
     if verbose:
         fams = {}
         for e in manifest:
             fams[e["family"]] = fams.get(e["family"], 0) + e["n"]
-        print(f"  pairs dataset: loaded {len(pris)} of {sum(fams.values())} "
+        print(f"  pairs dataset: loaded {got} of {sum(fams.values())} "
               f"available {dict(fams)}")
-    return pris, deg
+    return pris[:got], deg[:got]
 
 
 def synthetic_color_frame(seed, size=512):
