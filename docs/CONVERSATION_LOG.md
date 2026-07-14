@@ -334,6 +334,20 @@ questions were answered in teaching mode:
   Precedent: ControlNet's zero-convolutions start at exact zero by
   design, for the same reason as our guardrail: a new branch must start
   silent and earn its contribution.
+- **Why is t limited to ±1?** Because t is the only component allowed to
+  *invent*, its budget is capped at texture-level energy. In our units
+  (pixels 0–1, orthonormal DCT), ordinary detail coefficients live well
+  below 1 while strong structural edges reach 1–2 — so a bounded t can
+  wrongly smudge but cannot fabricate structure. It also matches t's
+  mission: quantization deletes the *small* coefficients (the big ones
+  survive and are g's job), so everything t legitimately restores fits
+  inside ±1. In practice trained |t| runs around 0.001–0.005 — two
+  orders of magnitude under the ceiling — so the tanh operates in its
+  linear zone and the bound is pure insurance, invisible until something
+  goes wrong. It's an exposed knob (`--tmax`), raisable on evidence
+  (watch for t pressing the rail), and the same logic taken to its
+  extreme is why DC gets t = 0 exactly: brightness synthesis is all
+  hazard, no mission.
 
 ---
 
