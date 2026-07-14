@@ -218,12 +218,13 @@ def main():
     ap.add_argument("--gmax", type=float, default=4.0,
                     help="upper bound of the coefficient gains (>1 allows "
                          "amplification)")
-    ap.add_argument("--arch", default="a", choices=["a", "b", "c", "d"],
+    ap.add_argument("--arch", default="a", choices=["a", "b", "c", "d", "e"],
                     help="a: baseline trunk (~40px view); b: + dilated "
                          "stack (~260px); c: + U-Net deep branch "
                          "(whole-crop view; pair with --crop-size 256); "
                          "d: c with global self-attention at the /32 "
-                         "bottleneck (learned retrieval)")
+                         "bottleneck (learned retrieval); e: c + per-block "
+                         "evidence MLP feeding g/t estimation only (gen-5)")
     ap.add_argument("--mae-epochs", type=int, default=0,
                     help="MAE-style pretraining epochs on masked pristine "
                          "crops before the paired fine-tune (0 = off)")

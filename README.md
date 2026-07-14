@@ -1,5 +1,9 @@
 # AdaptiveFilters — content-adaptive filter probe bank for no-reference VQA
 
+> **Start here — project overview**: [docs/PROJECT_OVERVIEW.md](docs/PROJECT_OVERVIEW.md) —
+> the whole project in one simple document: the idea, the mechanics, the
+> journey, key results, the laws learned, and what's next.
+>
 > **Full technical report**: [docs/PROJECT_REPORT.md](docs/PROJECT_REPORT.md) —
 > the complete design history with explanations, all experimental results,
 > lessons learned, and an annotated bibliography (papers, tutorials,

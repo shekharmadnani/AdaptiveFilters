@@ -22,7 +22,7 @@ class AdaptiveDctResult:
     k_pred: np.ndarray     # (H8/8, W8/8) float64, CNN-predicted K per block
     k_emp: np.ndarray      # same grid: closed-form RD count #{X_ac^2 > lam}
     k_tail: np.ndarray     # same grid: smallest K holding 98% of AC energy
-    t_map: np.ndarray = None  # gen-4 only: per-block mean |t| (synthesis
+    t_map: np.ndarray = None  # gen-4+ : per-block mean |t| (synthesis
     #                           effort -- the damage map); None otherwise
 
 
@@ -132,7 +132,7 @@ class AdaptiveWienerFilter:
             x = torch.from_numpy(
                 crop.transpose(2, 0, 1).astype(np.float32))[None].to(
                 self.device)                              # (1, C, H, W)
-            rec, _, gains, t, coeffs = wiener_apply(self.model, x)
+            rec, _, gains, t, coeffs, aux = wiener_apply(self.model, x)
 
             k_g = gains.sum(dim=(-1, -2)) - 1.0     # (1, C, N) effective AC
             ac2 = coeffs.reshape(1, c, -1, 64)[..., 1:].pow(2)
