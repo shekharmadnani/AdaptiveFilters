@@ -8,6 +8,10 @@
 > **Plain-language guide**: [docs/THE_FOUR_FILTERS.md](docs/THE_FOUR_FILTERS.md) —
 > the four learned-filter generations explained simply: ideas, methods,
 > experiments, lessons, literature, and a glossary.
+>
+> **Conversation log**: [docs/CONVERSATION_LOG.md](docs/CONVERSATION_LOG.md) —
+> the complete project dialogue retold in simple language: every question,
+> decision, experiment and result, in the order they happened.
 
 A NumPy-only prototype of the design discussed in the planning sessions:
 a bank of **content-adaptive filters** whose parameters are blindly estimated
