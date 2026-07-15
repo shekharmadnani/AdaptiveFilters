@@ -16,6 +16,11 @@
 > **Conversation log**: [docs/CONVERSATION_LOG.md](docs/CONVERSATION_LOG.md) —
 > the complete project dialogue retold in simple language: every question,
 > decision, experiment and result, in the order they happened.
+>
+> **Discussion trail (easiest read)**: [docs/DISCUSSION_TRAIL.md](docs/DISCUSSION_TRAIL.md) —
+> every step of the project elaborated in the simplest possible language:
+> what was discussed, what was done, what was learned — through
+> generation 5 and the champion's five title defenses.
 
 A NumPy-only prototype of the design discussed in the planning sessions:
 a bank of **content-adaptive filters** whose parameters are blindly estimated
