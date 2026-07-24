@@ -29,7 +29,6 @@ import numpy as np
 
 from .probes.dct_probe import dct_matrix
 from .learned.adaptive_dct import AdaptiveWienerFilter
-from .utils import box_filter
 
 _EPS = 1e-9
 
@@ -88,7 +87,7 @@ class SpatialErrorDetector:
     # ---- individual detector maps (each returns a (H/8, W/8) array)
 
     def _wiener_maps(self, gray_or_color, lum):
-        r = self.filter.apply(gray_or_color)
+        r = self.filter.apply(gray_or_color, light=True)
         resid = r.residual
         if resid.ndim == 3:
             resid = resid[:, :, 0]
@@ -166,35 +165,65 @@ class SpatialErrorDetector:
     def _incoherence_map(self, gray):
         """Torn-edge test: gradient energy that is NOT locally coherent.
         A natural edge has one dominant orientation (high structure-tensor
-        coherence); a concealment tear is strong but incoherent."""
-        gy, gx = np.gradient(gray)
-        jxx = box_filter(gx * gx, 2)
-        jyy = box_filter(gy * gy, 2)
-        jxy = box_filter(gx * gy, 2)
-        tr = jxx + jyy
-        coh = np.sqrt((jxx - jyy) ** 2 + 4 * jxy * jxy) / (tr + 1e-10)
-        return _block_mean(tr * (1.0 - coh))
+        coherence); a concealment tear is strong but incoherent. Runs on
+        the GPU (structure tensor + 8x8 block mean via pooling)."""
+        torch = self.filter._torch
+        import torch.nn.functional as F
+        with torch.inference_mode():
+            g = torch.from_numpy(np.ascontiguousarray(gray)).to(
+                self.filter.device)[None, None]
+            gp = F.pad(g, (1, 1, 1, 1), mode="replicate")
+            gx = (gp[..., 1:-1, 2:] - gp[..., 1:-1, :-2]) * 0.5
+            gy = (gp[..., 2:, 1:-1] - gp[..., :-2, 1:-1]) * 0.5
+
+            def box(m):
+                return F.avg_pool2d(m, 5, 1, 2, count_include_pad=False)
+
+            jxx, jyy, jxy = box(gx * gx), box(gy * gy), box(gx * gy)
+            tr = jxx + jyy
+            coh = torch.sqrt((jxx - jyy) ** 2 + 4 * jxy * jxy) / (tr + 1e-10)
+            sig = tr * (1.0 - coh)
+            bm = F.avg_pool2d(sig, 8, 8)[0, 0]
+            return bm.cpu().numpy().astype(np.float64)
 
     def _temporal_map(self, gray, prev):
+        """Motion-robust temporal residual: min over a search window of
+        |cur - shifted prev|. Runs on the GPU (already loaded for the
+        filter) -- 121 shifts on CPU cost ~1.8 s at 1080p, ~15 ms here."""
+        torch = self.filter._torch
+        dev = self.filter.device
         win = self.mc_window
-        best = np.full_like(gray, np.inf)
-        for dy in range(-win, win + 1):
-            for dx in range(-win, win + 1):
-                shifted = np.roll(prev, (dy, dx), axis=(0, 1))
-                best = np.minimum(best, np.abs(gray - shifted))
-        return _block_mean(best)
+        with torch.inference_mode():
+            c = torch.from_numpy(np.ascontiguousarray(gray)).to(dev)
+            p = torch.from_numpy(np.ascontiguousarray(prev)).to(dev)
+            h, w = c.shape
+            pp = torch.nn.functional.pad(
+                p[None, None], (win, win, win, win), mode="replicate")[0, 0]
+            best = None
+            for dy in range(2 * win + 1):
+                for dx in range(2 * win + 1):
+                    diff = (c - pp[dy:dy + h, dx:dx + w]).abs_()
+                    best = diff if best is None else torch.minimum(best, diff)
+            bm = best[: h // 8 * 8, : w // 8 * 8].reshape(
+                h // 8, 8, w // 8, 8).mean(dim=(1, 3))
+            return bm.cpu().numpy().astype(np.float64)
 
     # ---- raw maps for a frame (dict name -> map)
 
     def _maps(self, frame, prev=None):
-        gray = np.asarray(frame, dtype=np.float64)
-        if gray.max() > 2.0:
-            gray = gray / 255.0
-        if gray.ndim == 3:
-            lum = gray[:, :, 0]
-            wiener_in = gray
+        # keep the filter input in its native dtype (uint8 uploads cheaply
+        # and converts on the GPU); do the numpy channels in float32
+        raw = np.asarray(frame)
+        if raw.dtype == np.uint8:
+            lum = (raw[:, :, 0] if raw.ndim == 3 else raw).astype(
+                np.float32) / 255.0
+            wiener_in = raw
         else:
-            lum, wiener_in = gray, gray
+            f = raw.astype(np.float32, copy=False)
+            if f.max() > 2.0:
+                f = f / 255.0
+            lum = f[:, :, 0] if f.ndim == 3 else f
+            wiener_in = f
         res_e, t = self._wiener_maps(wiener_in, lum)
         out = {"wiener_res": res_e, "blocking": self._blocking_map(lum),
                "seam": self._seam_map(lum), "smooth": self._smooth_map(lum),
@@ -203,11 +232,10 @@ class SpatialErrorDetector:
         if t is not None:
             out["wiener_t"] = t
         if prev is not None:
-            p = np.asarray(prev, dtype=np.float64)
+            pr = np.asarray(prev)
+            p = (pr[:, :, 0] if pr.ndim == 3 else pr).astype(np.float32)
             if p.max() > 2.0:
                 p = p / 255.0
-            if p.ndim == 3:
-                p = p[:, :, 0]
             out["temporal"] = self._temporal_map(lum, p)
         # crop every map to the common grid size
         gh = min(m.shape[0] for m in out.values())
