@@ -134,6 +134,9 @@ def main():
             print(f"{name}: {n} bursts sampled over {dur/60:.0f} min",
                   flush=True)
 
+        if not bursts:
+            print("no bursts sampled (check file paths / decode)")
+            return
         # per-feature scale = typical within-shot frame-to-frame variation
         scale = typical_scale([vecs for _, _, _, vecs in bursts])
 
