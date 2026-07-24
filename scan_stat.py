@@ -63,13 +63,35 @@ def feature_vector(filt, frame):
     ], dtype=np.float64)
 
 
-def burst_scores(vectors):
-    """Per-frame max robust-z within the burst (content-local decision)."""
+def burst_scores(vectors, scale):
+    """Per-frame anomaly z: deviation from the BURST median (content-local
+    reference) normalized by a GLOBAL per-feature scale `scale` (stable
+    denominator). Using the within-burst MAD as the denominator explodes
+    when a burst is legitimately stable (MAD -> 0), especially for the
+    grid-snapped ggd_alpha; the global scale fixes that."""
     v = np.asarray(vectors)                       # (N, F)
     med = np.median(v, axis=0)
-    mad = np.median(np.abs(v - med), axis=0) * 1.4826 + 1e-9
-    z = np.abs(v - med) / mad                      # (N, F)
+    z = np.abs(v - med) / scale                    # (N, F)
     return z.max(axis=1), z                        # per-frame score, full z
+
+
+def typical_scale(bursts_vectors):
+    """Per-feature scale = the TYPICAL within-shot frame-to-frame variation
+    (median over bursts of each burst's within-burst MAD). This is the
+    right noise floor: a defect deviates from its burst by far more than
+    normal frame-to-frame variation, while cross-SHOT differences (which
+    dominate a global MAD and would swamp the signal) are excluded because
+    we only ever compare within a burst. Floored relative to the global
+    feature magnitude so a near-constant feature cannot blow up."""
+    mads = []
+    for v in bursts_vectors:
+        v = np.asarray(v)
+        mads.append(np.median(np.abs(v - np.median(v, axis=0)), axis=0)
+                    * 1.4826)
+    scale = np.median(np.asarray(mads), axis=0)
+    gv = np.concatenate([np.asarray(v) for v in bursts_vectors])
+    floor = 1e-2 * (np.abs(np.median(gv, axis=0)) + 1e-6)
+    return np.maximum(scale, floor)
 
 
 def main():
@@ -85,33 +107,41 @@ def main():
     args = ap.parse_args()
 
     filt = AdaptiveWienerFilter(args.weights)
-    hits = []           # (score, file, time, frame, feat_name)
+    bursts = []          # (file, t, [frames], [vectors])
     tmp = tempfile.mkdtemp(prefix="stat_")
     try:
+        # pass 1: gather every burst's per-frame feature vectors
         for path in args.files:
             dur = duration(path)
             if dur <= 0:
                 continue
             name = os.path.basename(path)
             ts = np.linspace(0.03 * dur, 0.97 * dur, args.seeks)
-            nb = 0
+            n = 0
             for si, t in enumerate(ts):
                 frames = extract_burst(path, float(t), args.burst, tmp,
                                        f"s{si}")
                 if len(frames) < 5:
                     continue
                 vecs = [feature_vector(filt, f) for f in frames]
-                scores, z = burst_scores(vecs)
-                k = int(np.argmax(scores))
-                # transient: peak frame high, the rest (median) low
-                rest = np.median(np.delete(scores, k))
-                if scores[k] >= args.z and rest < args.z * 0.5:
-                    fname = FEATS[int(np.argmax(z[k]))]
-                    hits.append((float(scores[k]), name,
-                                 float(t) + k / 29.97, frames[k], fname))
-                    nb += 1
-            print(f"{name}: {nb} transient anomalies over {dur/60:.0f} min",
+                bursts.append((name, float(t), frames, vecs))
+                n += 1
+            print(f"{name}: {n} bursts sampled over {dur/60:.0f} min",
                   flush=True)
+
+        # per-feature scale = typical within-shot frame-to-frame variation
+        scale = typical_scale([vecs for _, _, _, vecs in bursts])
+
+        # pass 2: content-local transient anomaly per burst
+        hits = []           # (score, file, time, frame, feat_name)
+        for name, t, frames, vecs in bursts:
+            scores, z = burst_scores(vecs, scale)
+            k = int(np.argmax(scores))
+            rest = np.median(np.delete(scores, k))    # neighbours' level
+            if scores[k] >= args.z and rest < args.z * 0.5:
+                fname = FEATS[int(np.argmax(z[k]))]
+                hits.append((float(scores[k]), name,
+                             t + k / 29.97, frames[k], fname))
 
         hits.sort(reverse=True, key=lambda h: h[0])
         os.makedirs(args.out, exist_ok=True)
