@@ -57,6 +57,9 @@ def build_probes():
     if os.path.exists(m + "wiener4_pairs.pt"):  # 3-codec real pairs
         probes["gen4_pairs"] = (LearnedWienerProbe(m + "wiener4_pairs.pt"),
                                 "color")
+    if os.path.exists(m + "wiener5_hybrid.pt"):  # gen-5 CNN+MLP hybrid
+        probes["gen5_hybrid"] = (LearnedWienerProbe(m + "wiener5_hybrid.pt"),
+                                 "color")
     return probes
 
 

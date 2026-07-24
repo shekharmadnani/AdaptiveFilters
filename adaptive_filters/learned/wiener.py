@@ -96,7 +96,7 @@ class WienerDctModel(nn.Module):
         if self.affine:
             t = self._shape_field(
                 self.tmax * torch.tanh(self.head_t(h)), b, c, dc_value=0.0)
-        return g, t
+        return g, t, None
 
 
 class TransformerNeck(nn.Module):
@@ -162,15 +162,26 @@ class WienerDctModelV2(nn.Module):
               isolates exactly one question: does learned RETRIEVAL beat
               the U-Net's static regional summary? Everything else
               (stem, skips, heads, losses) is identical to arch c.
+    arch="e": arch c + a per-block EVIDENCE branch (generation 5, the
+              CNN+MLP hybrid). The CNN supplies context ("what should be
+              here"); a small shared MLP reads the block's OWN 64 DCT
+              coefficient magnitudes directly ("what actually arrived" --
+              implicitly judging whether the block looks natural or not).
+              Both streams fuse to estimate g and t, and NOTHING else:
+              no explicit health output, no extra supervision -- the
+              healthy/unnatural judgment lives inside the MLP's learned
+              features. Prior + evidence fusion is the classical Wiener
+              structure, learned.
 
-    Same forward contract as WienerDctModel: (B,C,H,W) -> gains
-    (B,C,N,8,8) in [0,gmax], DC pinned to 1.
+    Forward contract: (B,C,H,W) -> (gains, t, aux) where gains/t are
+    (B,C,N,8,8), t is None for gain-only models, and aux is reserved
+    (always None currently).
     """
 
     def __init__(self, lam_rate=2.5e-3, channels=32, in_channels=3,
                  gmax=4.0, arch="b", affine=False, tmax=1.0):
         super().__init__()
-        assert arch in ("b", "c", "d")
+        assert arch in ("b", "c", "d", "e")
         self.lam_rate = lam_rate
         self.in_channels = in_channels
         self.gmax = gmax
@@ -196,7 +207,7 @@ class WienerDctModelV2(nn.Module):
             nn.Conv2d(2 * c, 2 * c, 3, padding=4, dilation=4), r,
             nn.Conv2d(2 * c, 2 * c, 3, padding=8, dilation=8), r,
         )
-        if arch in ("c", "d"):
+        if arch in ("c", "d", "e"):
             self.down1 = nn.Sequential(                 # /16
                 nn.MaxPool2d(2), nn.Conv2d(2 * c, 4 * c, 3, padding=1), r)
             self.down2 = nn.Sequential(                 # /32 (whole-crop view)
@@ -207,6 +218,15 @@ class WienerDctModelV2(nn.Module):
                 nn.Conv2d(4 * c, 2 * c, 3, padding=1), r)
         if arch == "d":
             self.neck = TransformerNeck(dim=4 * c)      # retrieval at /32
+        if arch == "e":
+            # per-block MLP on the block's own DCT magnitudes (1x1 convs
+            # on the block grid = an MLP shared across all blocks); its
+            # features feed ONLY the g/t estimation
+            self.evid = nn.Sequential(
+                nn.Conv2d(in_channels * 64, 128, 1), r,
+                nn.Conv2d(128, 64, 1), r)
+            self.fuse_ev = nn.Sequential(
+                nn.Conv2d(2 * c + 64, 2 * c, 1), r)
         self.head = nn.Conv2d(2 * c, in_channels * 64, 1)
         nn.init.constant_(self.head.bias, -1.6)         # gains start ~0.7
         nn.init.normal_(self.head.weight, std=0.01)
@@ -220,7 +240,7 @@ class WienerDctModelV2(nn.Module):
 
         b, c = x.shape[0], self.in_channels
         f = self.dilated(self.stem(x))                  # fine, at block grid
-        if self.arch in ("c", "d"):
+        if self.arch in ("c", "d", "e"):
             g16 = self.down1(f)
             g32 = self.down2(g16)
             if self.arch == "d":
@@ -229,6 +249,18 @@ class WienerDctModelV2(nn.Module):
             m16 = self.fuse16(torch.cat([u16, g16], dim=1))
             u8 = F.interpolate(m16, size=f.shape[-2:], mode="nearest")
             f = self.fuse8(torch.cat([u8, f], dim=1))   # big-picture + skip
+        aux = None
+        if self.arch == "e":
+            # evidence branch: what actually arrived in THIS block
+            h8, w8 = f.shape[-2:]
+            blocks = frames_to_blocks_c(x[:, :, : h8 * 8, : w8 * 8])
+            coeffs = torch.matmul(torch.matmul(self.dmat, blocks),
+                                  self.dmat.T)          # (B, C, N, 8, 8)
+            mag = torch.log1p(coeffs.abs() * 10.0)      # scale-compressed
+            e_map = mag.reshape(b, c, -1, 64).permute(0, 1, 3, 2) \
+                .reshape(b, c * 64, h8, w8)
+            ev = self.evid(e_map)                       # (B, 64, h8, w8)
+            f = self.fuse_ev(torch.cat([f, ev], dim=1))
         g = WienerDctModel._shape_field(
             self, self.gmax * torch.sigmoid(self.head(f)), b, c, dc_value=1.0)
         t = None
@@ -236,22 +268,23 @@ class WienerDctModelV2(nn.Module):
             t = WienerDctModel._shape_field(
                 self, self.tmax * torch.tanh(self.head_t(f)), b, c,
                 dc_value=0.0)
-        return g, t
+        return g, t, aux
 
 
 def wiener_apply(model, frames_t):
     """frames_t (B, C, H, W), H/W divisible by 8 -> (rec, rec_blocks,
-    gains, t, coeffs). t is None for gain-only (gen-3) models; for affine
-    (gen-4) models the reconstruction is IDCT(g*X + t)."""
+    gains, t, coeffs, aux). t is None for gain-only (gen-3) models; aux
+    is None or {"health": map} for the gen-5 hybrid."""
     _, _, h, w = frames_t.shape
-    gains, t = model(frames_t)                  # each (B, C, N, 8, 8)
+    gains, t, aux = model(frames_t)             # fields (B, C, N, 8, 8)
     blocks = frames_to_blocks_c(frames_t)
     coeffs = torch.matmul(torch.matmul(model.dmat, blocks), model.dmat.T)
     xf = gains * coeffs
     if t is not None:
         xf = xf + t
     rec_blocks = torch.matmul(torch.matmul(model.dmat.T, xf), model.dmat)
-    return blocks_to_frames_c(rec_blocks, h, w), rec_blocks, gains, t, coeffs
+    return (blocks_to_frames_c(rec_blocks, h, w), rec_blocks, gains, t,
+            coeffs, aux)
 
 
 def wiener_loss(model, frame, target=None, w_e1=0.05, w_e2=0.05, mu=0.02):
@@ -265,7 +298,7 @@ def wiener_loss(model, frame, target=None, w_e1=0.05, w_e2=0.05, mu=0.02):
     """
     if target is None:
         target = frame
-    rec, rec_blocks, gains, t, _ = wiener_apply(model, frame)
+    rec, rec_blocks, gains, t, coeffs, aux = wiener_apply(model, frame)
 
     target_blocks = frames_to_blocks_c(target)
     recon = (rec_blocks - target_blocks).pow(2).sum(dim=(-1, -2)).mean()
@@ -290,9 +323,10 @@ def wiener_loss(model, frame, target=None, w_e1=0.05, w_e2=0.05, mu=0.02):
     if t is not None:
         t_pen = t.abs().sum(dim=(-1, -2)).mean()   # per-block L1
         total = total + mu * t_pen
-        logs["loss"] = float(total.detach())
         logs["t_abs"] = float(t.detach().abs().mean())
         logs["t_active"] = float((t.detach().abs() > 0.01).float().mean())
+
+    logs["loss"] = float(total.detach())
     return total, logs
 
 

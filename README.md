@@ -1,5 +1,9 @@
 # AdaptiveFilters — content-adaptive filter probe bank for no-reference VQA
 
+> **Start here — project overview**: [docs/PROJECT_OVERVIEW.md](docs/PROJECT_OVERVIEW.md) —
+> the whole project in one simple document: the idea, the mechanics, the
+> journey, key results, the laws learned, and what's next.
+>
 > **Full technical report**: [docs/PROJECT_REPORT.md](docs/PROJECT_REPORT.md) —
 > the complete design history with explanations, all experimental results,
 > lessons learned, and an annotated bibliography (papers, tutorials,
@@ -12,6 +16,11 @@
 > **Conversation log**: [docs/CONVERSATION_LOG.md](docs/CONVERSATION_LOG.md) —
 > the complete project dialogue retold in simple language: every question,
 > decision, experiment and result, in the order they happened.
+>
+> **Discussion trail (easiest read)**: [docs/DISCUSSION_TRAIL.md](docs/DISCUSSION_TRAIL.md) —
+> every step of the project elaborated in the simplest possible language:
+> what was discussed, what was done, what was learned — through
+> generation 5 and the champion's five title defenses.
 
 A NumPy-only prototype of the design discussed in the planning sessions:
 a bank of **content-adaptive filters** whose parameters are blindly estimated

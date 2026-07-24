@@ -15,3 +15,9 @@ out_inspect*/
 # training run logs
 *_log.txt
 *_err.txt
+
+# detector output images (regenerate with detect_errors.py)
+out_detect*/
+
+# all detector/scan/QC output dirs
+out_*/

@@ -22,7 +22,7 @@ class AdaptiveDctResult:
     k_pred: np.ndarray     # (H8/8, W8/8) float64, CNN-predicted K per block
     k_emp: np.ndarray      # same grid: closed-form RD count #{X_ac^2 > lam}
     k_tail: np.ndarray     # same grid: smallest K holding 98% of AC energy
-    t_map: np.ndarray = None  # gen-4 only: per-block mean |t| (synthesis
+    t_map: np.ndarray = None  # gen-4+ : per-block mean |t| (synthesis
     #                           effort -- the damage map); None otherwise
 
 
@@ -110,13 +110,21 @@ class AdaptiveWienerFilter:
         self.lam_rate = self.model.lam_rate
         self.in_channels = self.model.in_channels
 
-    def apply(self, frame):
+    def apply(self, frame, light=False):
+        """Run the filter. `light=True` (for the residual/damage-map use,
+        e.g. the error detector) skips the k_emp/k_tail coefficient-sort
+        maps, returns float32, and uploads uint8 input directly with the
+        /255 done on the GPU -- roughly halving the per-frame host cost.
+        The default path is unchanged (float64 outputs, all K maps)."""
         torch = self._torch
         from .wiener import wiener_apply
 
-        frame = np.asarray(frame, dtype=np.float64)
-        if frame.max() > 2.0:
-            frame = frame / 255.0
+        frame = np.asarray(frame)
+        is_u8 = frame.dtype == np.uint8
+        if not is_u8:
+            frame = frame.astype(np.float64, copy=False)
+            if frame.max() > 2.0:
+                frame = frame / 255.0
         gray_in = frame.ndim == 2
         if gray_in:
             frame = np.repeat(frame[:, :, None], self.in_channels, axis=2)
@@ -127,41 +135,54 @@ class AdaptiveWienerFilter:
         h8, w8 = (frame.shape[0] // 8) * 8, (frame.shape[1] // 8) * 8
         crop = frame[:h8, :w8]
         gh, gw = h8 // 8, w8 // 8
+        odt = np.float32 if light else np.float64
 
-        with torch.no_grad():
-            x = torch.from_numpy(
-                crop.transpose(2, 0, 1).astype(np.float32))[None].to(
-                self.device)                              # (1, C, H, W)
-            rec, _, gains, t, coeffs = wiener_apply(self.model, x)
+        with torch.inference_mode():
+            chw = np.ascontiguousarray(crop.transpose(2, 0, 1))
+            if is_u8:  # tiny upload (uint8), convert on the GPU
+                x = torch.from_numpy(chw).to(self.device)[None].float() \
+                    .div_(255.0)
+            else:
+                x = torch.from_numpy(chw.astype(np.float32))[None].to(
+                    self.device)
+            rec, _, gains, t, coeffs, aux = wiener_apply(self.model, x)
 
-            k_g = gains.sum(dim=(-1, -2)) - 1.0     # (1, C, N) effective AC
-            ac2 = coeffs.reshape(1, c, -1, 64)[..., 1:].pow(2)
-            k_emp = (ac2 > self.lam_rate).float().sum(-1)
-            srt = ac2.sort(dim=-1, descending=True).values
-            cum = srt.cumsum(-1)
-            total = cum[..., -1:].clamp(min=1e-12)
-            k_tail = (cum < 0.98 * total).float().sum(-1) + 1.0
-            k_tail = torch.where(total.squeeze(-1) < 1e-10,
-                                 torch.zeros_like(k_tail), k_tail)
-
-            filtered = rec.squeeze(0).permute(1, 2, 0).cpu().numpy() \
-                .astype(np.float64)                       # (H8, W8, C)
-            k_pred_np = k_g.reshape(c, gh, gw).cpu().numpy() \
-                .astype(np.float64)
-            k_emp_np = k_emp.reshape(c, gh, gw).cpu().numpy().astype(np.float64)
-            k_tail_np = k_tail.reshape(c, gh, gw).cpu().numpy().astype(np.float64)
+            filtered = rec.squeeze(0).permute(1, 2, 0).contiguous() \
+                .cpu().numpy().astype(odt, copy=False)    # (H8, W8, C)
             t_map = None
             if t is not None:  # synthesis-effort (damage) map
                 t_map = t.abs().mean(dim=(-1, -2)).reshape(c, gh, gw) \
-                    .cpu().numpy().astype(np.float64)
+                    .cpu().numpy().astype(odt, copy=False)
 
-        if gray_in:  # collapse back to the caller's layout (channels equal)
+            if light:
+                k_pred_np = k_emp_np = k_tail_np = None
+            else:
+                k_g = gains.sum(dim=(-1, -2)) - 1.0    # (1, C, N) effective AC
+                ac2 = coeffs.reshape(1, c, -1, 64)[..., 1:].pow(2)
+                k_emp = (ac2 > self.lam_rate).float().sum(-1)
+                srt = ac2.sort(dim=-1, descending=True).values
+                cum = srt.cumsum(-1)
+                total = cum[..., -1:].clamp(min=1e-12)
+                k_tail = (cum < 0.98 * total).float().sum(-1) + 1.0
+                k_tail = torch.where(total.squeeze(-1) < 1e-10,
+                                     torch.zeros_like(k_tail), k_tail)
+                k_pred_np = k_g.reshape(c, gh, gw).cpu().numpy() \
+                    .astype(np.float64)
+                k_emp_np = k_emp.reshape(c, gh, gw).cpu().numpy() \
+                    .astype(np.float64)
+                k_tail_np = k_tail.reshape(c, gh, gw).cpu().numpy() \
+                    .astype(np.float64)
+
+        crop_f = crop.astype(odt, copy=False)
+        if is_u8:
+            crop_f = crop_f / 255.0
+        if gray_in:
             filtered = filtered[:, :, 0]
-            crop = crop[:, :, 0]
+            crop_f = crop_f[:, :, 0]
 
         return AdaptiveDctResult(
             filtered=filtered,
-            residual=crop - filtered,
+            residual=crop_f - filtered,
             k_pred=k_pred_np,
             k_emp=k_emp_np,
             k_tail=k_tail_np,

@@ -41,7 +41,7 @@ class LearnedWienerProbe(Probe):
         feats["k_emp_mean"] = float(r.k_emp.mean())
         feats["k_tail_mean"] = float(r.k_tail.mean())
 
-        if r.t_map is not None:  # gen-4: synthesis effort = damage map
+        if r.t_map is not None:  # gen-4+ : synthesis effort = damage map
             feats["t_abs_mean"] = float(r.t_map.mean())
             feats["t_abs_p90"] = float(np.percentile(r.t_map, 90))
             feats["t_tile_max"] = float(r.t_map.max())
