@@ -51,10 +51,22 @@ def extract_burst(path, t, burst, tmpdir, tag):
     for i in range(1, burst + 1):
         fp = os.path.join(tmpdir, f"{tag}_{i:03d}.png")
         if os.path.exists(fp):
-            # keep uint8 in RAM (the detector converts per frame); float64
-            # would be ~50 MB/frame and blow up memory over a long scan
-            frames.append(np.asarray(Image.open(fp), dtype=np.uint8))
-            os.remove(fp)
+            try:
+                # keep uint8 in RAM (the detector converts per frame);
+                # float64 would be ~50 MB/frame and blow up memory
+                with Image.open(fp) as im:
+                    arr = np.asarray(im, dtype=np.uint8)
+                if arr.ndim == 3 and arr.shape[2] == 3:
+                    frames.append(arr)
+            except (OSError, ValueError):
+                # truncated/corrupt PNG from a network glitch -- skip the
+                # frame rather than crash the whole scan
+                pass
+            finally:
+                try:
+                    os.remove(fp)
+                except OSError:
+                    pass
     return frames
 
 
