@@ -18,3 +18,6 @@ out_inspect*/
 
 # detector output images (regenerate with detect_errors.py)
 out_detect*/
+
+# all detector/scan/QC output dirs
+out_*/
