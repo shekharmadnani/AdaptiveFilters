@@ -77,11 +77,23 @@ def _mad(v):
 
 # --------------------------------------------------------------- detector
 
+ALL_CHANNELS = ("wiener_res", "wiener_t", "blocking", "seam", "smooth",
+                "overshoot", "incoherence", "temporal")
+
+# content-robust subset that survives out-of-domain broadcast footage
+# (crowd texture, camera pans): the gen-4 learned channels + the
+# axis-aligned seam test. The measured evidence -- on a clean broadcast
+# frame these fire ~0% while blocking/temporal/incoherence/overshoot/
+# smooth fire 18-51% -- motivates using just these three.
+ROBUST_CHANNELS = ("wiener_res", "wiener_t", "seam")
+
+
 class SpatialErrorDetector:
-    def __init__(self, weights, device=None, mc_window=5):
+    def __init__(self, weights, device=None, mc_window=5, channels=None):
         self.filter = AdaptiveWienerFilter(weights, device=device)
         self.dmat = dct_matrix(8)
         self.mc_window = mc_window
+        self.channels = tuple(channels) if channels else ALL_CHANNELS
         self.baseline = {}          # name -> (median, mad)
 
     # ---- individual detector maps (each returns a (H/8, W/8) array)
@@ -224,14 +236,25 @@ class SpatialErrorDetector:
                 f = f / 255.0
             lum = f[:, :, 0] if f.ndim == 3 else f
             wiener_in = f
-        res_e, t = self._wiener_maps(wiener_in, lum)
-        out = {"wiener_res": res_e, "blocking": self._blocking_map(lum),
-               "seam": self._seam_map(lum), "smooth": self._smooth_map(lum),
-               "overshoot": self._overshoot_map(lum),
-               "incoherence": self._incoherence_map(lum)}
-        if t is not None:
-            out["wiener_t"] = t
-        if prev is not None:
+        ch = self.channels
+        out = {}
+        if "wiener_res" in ch or "wiener_t" in ch:
+            res_e, t = self._wiener_maps(wiener_in, lum)
+            if "wiener_res" in ch:
+                out["wiener_res"] = res_e
+            if "wiener_t" in ch and t is not None:
+                out["wiener_t"] = t
+        if "blocking" in ch:
+            out["blocking"] = self._blocking_map(lum)
+        if "seam" in ch:
+            out["seam"] = self._seam_map(lum)
+        if "smooth" in ch:
+            out["smooth"] = self._smooth_map(lum)
+        if "overshoot" in ch:
+            out["overshoot"] = self._overshoot_map(lum)
+        if "incoherence" in ch:
+            out["incoherence"] = self._incoherence_map(lum)
+        if "temporal" in ch and prev is not None:
             pr = np.asarray(prev)
             p = (pr[:, :, 0] if pr.ndim == 3 else pr).astype(np.float32)
             if p.max() > 2.0:
@@ -257,18 +280,17 @@ class SpatialErrorDetector:
 
     # ---- detection
 
-    def detect(self, frame, prev=None, margin=4.0, votes=3, area_thr=0.004,
+    def detect(self, frame, prev=None, margin=4.0, votes=2, area_thr=0.004,
                require=("blocking", "temporal")):
-        """A block is flagged when >= `votes` detectors exceed `margin`
-        AND at least one DISCRIMINATIVE detector (`require`) fires. The
-        gate channels have false-alarm patterns independent of natural
-        texture -- grid-phase blocking (coding seams), motion-robust
-        temporal (regions not tracking motion), and the smoothness
-        anomaly (interpolated bands). The remaining channels only
-        CONTRIBUTE votes: they raise recall at genuine seams but cannot
-        trip a flag alone, so texture co-flags stay suppressed."""
+        """A block is flagged when >= `votes` active detectors exceed
+        `margin` AND at least one DISCRIMINATIVE gate detector (`require`)
+        fires. Gate channels present in the active set act as the gate; if
+        none are active (e.g. the robust wiener_res/wiener_t/seam subset),
+        the vote count alone decides -- those channels are content-robust
+        enough not to need a separate gate."""
         maps = self._maps(frame, prev)
         gh, gw = next(iter(maps.values())).shape
+        active_gate = [k for k in require if k in maps]
         z = {}
         vote = np.zeros((gh, gw))
         disc = np.zeros((gh, gw), bool)
@@ -278,9 +300,11 @@ class SpatialErrorDetector:
             z[k] = zk
             fired = zk > margin
             vote += fired.astype(float)
-            if k in require:
+            if k in active_gate:
                 disc |= fired
-        error_mask = (vote >= votes) & disc
+        gate_ok = disc if active_gate else np.ones((gh, gw), bool)
+        v_need = min(votes, len(maps))
+        error_mask = (vote >= v_need) & gate_ok
         frac = float(error_mask.mean())
         return {
             "error_mask": error_mask,       # (H/8, W/8) bool
