@@ -119,13 +119,18 @@ def main():
             ts = np.linspace(0.03 * dur, 0.97 * dur, args.seeks)
             n = 0
             for si, t in enumerate(ts):
-                frames = extract_burst(path, float(t), args.burst, tmp,
-                                       f"s{si}")
-                if len(frames) < 5:
-                    continue
-                vecs = [feature_vector(filt, f) for f in frames]
-                bursts.append((name, float(t), frames, vecs))
-                n += 1
+                try:  # any per-burst failure (network glitch, decode,
+                    #   corrupt frame) skips this sample, never the scan
+                    frames = extract_burst(path, float(t), args.burst, tmp,
+                                           f"s{si}")
+                    if len(frames) < 5:
+                        continue
+                    vecs = [feature_vector(filt, f) for f in frames]
+                    bursts.append((name, float(t), frames, vecs))
+                    n += 1
+                except Exception as e:
+                    print(f"  skip seek {si} ({e.__class__.__name__})",
+                          flush=True)
             print(f"{name}: {n} bursts sampled over {dur/60:.0f} min",
                   flush=True)
 
